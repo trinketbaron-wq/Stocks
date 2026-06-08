@@ -682,20 +682,38 @@ def get_spy(period):
     except Exception: return None
 @st.cache_data(ttl=3600,show_spinner=False)
 def get_fundamentals(t):
-    try: info=yf.Ticker(t).info or {}
+    info={}; tk=None
+    try: tk=yf.Ticker(t)
+    except Exception: tk=None
+    try: info=(tk.info if tk else {}) or {}
     except Exception: info={}
+    fi={}
+    if tk is not None:
+        try:
+            fobj=tk.fast_info
+            for kk in ["market_cap","year_high","year_low","last_volume",
+                       "ten_day_average_volume","three_month_average_volume"]:
+                try: fi[kk]=fobj[kk]
+                except Exception:
+                    try: fi[kk]=getattr(fobj,kk)
+                    except Exception: pass
+        except Exception: pass
     def g(*keys):
         for k in keys:
             x=info.get(k)
             if x not in (None,"",0): return x
         return None
     return dict(name=g("shortName","longName") or t, sector=g("sector"),
-        industry=g("industry"), market_cap=g("marketCap"), pe=g("trailingPE"),
-        fpe=g("forwardPE"), eps=g("trailingEps"), div=g("dividendYield"),
-        beta=g("beta"), pb=g("priceToBook"), margin=g("profitMargins"),
-        hi52=g("fiftyTwoWeekHigh"), lo52=g("fiftyTwoWeekLow"),
-        avg_vol=g("averageVolume","averageDailyVolume10Day"),
-        volume=g("volume","regularMarketVolume"))
+        industry=g("industry"),
+        market_cap=g("marketCap") or fi.get("market_cap"),
+        pe=g("trailingPE"), fpe=g("forwardPE"), eps=g("trailingEps"),
+        div=g("dividendYield"), beta=g("beta"), pb=g("priceToBook"),
+        margin=g("profitMargins"),
+        hi52=g("fiftyTwoWeekHigh") or fi.get("year_high"),
+        lo52=g("fiftyTwoWeekLow") or fi.get("year_low"),
+        avg_vol=g("averageVolume","averageDailyVolume10Day")
+                or fi.get("ten_day_average_volume") or fi.get("three_month_average_volume"),
+        volume=g("volume","regularMarketVolume") or fi.get("last_volume"))
 
 def _extract_fin(stmt):
     """Pull revenue + net income series out of a yfinance income statement frame."""
@@ -1688,6 +1706,15 @@ if tickers and (run or any(syms)):
         o=enrich(hist)
         composite,strength,state,votes,max_w=signal_frame(o,vix_series,spy_series)
         funda=dict(get_fundamentals(t))   # copy (cached dict) before adding price-derived stat
+        # price-derived backfill — always reliable since we already hold OHLCV (yfinance .info is flaky)
+        try:
+            if funda.get("hi52") is None: funda["hi52"]=float(o.High.tail(252).max())
+            if funda.get("lo52") is None: funda["lo52"]=float(o.Low.tail(252).min())
+            if funda.get("volume") is None: funda["volume"]=float(o.Volume.iloc[-1])
+            if funda.get("avg_vol") is None:
+                va0=o.VolAvg20.iloc[-1]
+                if va0==va0: funda["avg_vol"]=float(va0)
+        except Exception: pass
         try:
             va=o.VolAvg20.iloc[-1]
             funda["vol_chg"]=(o.Volume.iloc[-1]/va-1)*100 if va and va==va else None

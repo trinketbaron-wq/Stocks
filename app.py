@@ -135,15 +135,34 @@ input::placeholder, textarea::placeholder { color:#7d8694 !important; }
   border-color:#3ec1d3 !important; color:#fff !important;
 }
 /* ---- selection pills/chips: dark bg, light text; selected = green ---- */
-[data-testid="stPills"] button, .stPills button, [data-baseweb="pill"]{
-  background:#0d1622 !important; color:#cfd6df !important;
-  border:1px solid rgba(255,255,255,0.18) !important;
+[data-testid="stPills"] button, .stPills button, [data-baseweb="pill"],
+[data-testid="stButtonGroup"] button, [role="group"] button[kind="pills"],
+[data-testid="stBaseButton-pills"], [data-testid="stBaseButton-pillsActive"],
+button[kind="pills"], button[kind="pillsActive"]{
+  background:#0d1622 !important; color:#e6edf3 !important;
+  border:1px solid rgba(255,255,255,0.22) !important;
 }
+[data-testid="stPills"] button *, [data-testid="stButtonGroup"] button *,
+[data-testid="stBaseButton-pills"] *{ color:#e6edf3 !important; }
 [data-testid="stPills"] button[aria-selected="true"],
-[data-testid="stPills"] button[kind="primary"],
-[data-testid="stPills"] button[aria-pressed="true"]{
-  background:rgba(22,199,132,0.18) !important; color:#16c784 !important;
-  border-color:#16c784 !important;
+[data-testid="stPills"] button[aria-pressed="true"],
+[data-testid="stButtonGroup"] button[aria-checked="true"],
+[data-testid="stButtonGroup"] button[aria-pressed="true"],
+[data-testid="stBaseButton-pillsActive"], button[kind="pillsActive"]{
+  background:rgba(234,57,67,0.20) !important; border-color:#ea3943 !important;
+}
+[data-testid="stBaseButton-pillsActive"], [data-testid="stBaseButton-pillsActive"] *,
+[data-testid="stButtonGroup"] button[aria-checked="true"], [data-testid="stButtonGroup"] button[aria-checked="true"] *,
+button[kind="pillsActive"], button[kind="pillsActive"] *{ color:#ff6b73 !important; }
+/* ---- sidebar collapse / expand arrow: make the icon visible on dark ---- */
+[data-testid="stSidebarCollapseButton"] svg, [data-testid="stSidebarCollapse"] svg,
+[data-testid="collapsedControl"] svg, [data-testid="stSidebarHeader"] svg,
+[data-testid="stSidebarCollapsedControl"] svg, [data-testid="stExpandSidebarButton"] svg,
+[data-testid="stSidebarCollapseButton"] button, [data-testid="stSidebarHeader"] button{
+  fill:#e6edf3 !important; color:#e6edf3 !important; opacity:1 !important;
+}
+[data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"]{
+  background:rgba(255,255,255,0.06) !important; border-radius:8px !important;
 }
 /* ---- universal readable text: labels, captions, body all near-white ---- */
 label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
@@ -1824,7 +1843,7 @@ if tickers and (run or any(syms)):
 
                 # ---- backtest: chosen strategy vs buy & hold (strategy already resolved above) ----
                 st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
-                st.caption(rule)
+                st.caption(rule, unsafe_allow_html=True)
                 bt=backtest(d["o"],pos,cost=bt_cost)
                 st.plotly_chart(equity_chart(bt,t,label=strat_name),use_container_width=True,key=f"eq_{t}")
                 edge=bt["strat_ret"]-bt["bh_ret"]

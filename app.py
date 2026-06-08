@@ -518,13 +518,27 @@ def fetch_movers(universe_name):
 # ==========================================================================
 def verdict_color(state): return {"BUY":GREEN,"SELL":RED}.get(state,AMBER)
 
-def score_card(tkr,strength,state,funda):
-    col=verdict_color(state)
+def score_card(tkr,strength,state,funda,bespoke=None):
     vc=funda.get("vol_chg")
     voltxt="—" if vc is None else f"{'▲' if vc>=0 else '▼'} {abs(vc):.0f}%"
     volcol=GREEN if (vc is not None and vc>=0) else (RED if vc is not None else MUTE)
     sub=(f"MCAP {money(funda.get('market_cap'))} · P/E {fnum(funda.get('pe'))} · "
          f"DIV {fpct(funda.get('div'))} · VOL <span style='color:{volcol}'>{voltxt}</span>")
+    if bespoke:
+        poscol=GREEN if bespoke["long"] else AMBER
+        badge="LONG ▲" if bespoke["long"] else "CASH ■"
+        beat=bespoke["beat"]; numcol=GREEN if beat else RED
+        tag=("✓ beat buy &amp; hold out-of-sample" if beat
+             else "✗ did NOT beat buy &amp; hold out-of-sample")
+        return f"""<div class="card" style="border-color:{AMBER}66">
+      <span class="deck-tkr">{tkr}</span>
+      <span class="verdict" style="background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{badge}</span>
+      <div class="lab">🔬 bespoke · out-of-sample return</div>
+      <div class="num" style="color:{numcol}">{bespoke['oos']:+.0f}%<span style="font-size:15px;color:{MUTE}"> vs B&amp;H {bespoke['bh']:+.0f}%</span></div>
+      <div class="cardsub" style="color:{numcol}">{bespoke['rule']} · {tag}</div>
+      <div class="cardsub">{sub}</div>
+    </div>"""
+    col=verdict_color(state)
     return f"""<div class="card">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
@@ -1140,13 +1154,58 @@ if tickers and (run or any(syms)):
             st.markdown(f"<div class='subnote'>Market fear · <b style='color:{vc}'>VIX {vix_now:.1f}</b> "
                         f"({'calm' if vix_now<17 else 'normal' if vix_now<22 else 'elevated' if vix_now<30 else 'high fear'}) "
                         f"— folded into every score.</div>",unsafe_allow_html=True)
-        # SCORE CARDS — each card gets its own breakdown button attached directly beneath it
+        # SCORE CARDS — each card carries: backtest-data lifecycle, a bespoke toggle, breakdown button
         ccols=st.columns(len(data))
         for col,(t,d) in zip(ccols,data.items()):
             with col:
-                st.markdown(score_card(t,d["strength"],d["state"],d["funda"]),unsafe_allow_html=True)
-                if st.button(f"🔢 How {int(d['strength'])}/100 is built",key=f"bd_{t}",
-                             use_container_width=True,help="Per-indicator score breakdown"):
+                ores=st.session_state.get(f"optres_{t}"); has=bool(ores and ores.get("rows"))
+                asof=st.session_state.get(f"optres_asof_{t}")
+                # --- backtest-data lifecycle ---
+                if not has:
+                    if st.button("⚡ Load backtest data",key=f"load_{t}",use_container_width=True,
+                                 help="Tune & out-of-sample-test rules on this stock so a bespoke signal becomes available."):
+                        with st.spinner(f"Backtesting {t}…"):
+                            st.session_state[f"optres_{t}"]=optimize_for_ticker(
+                                d,list(BT_STRATEGIES.keys()),split_frac=0.7,cost=bt_cost)
+                            st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                        st.rerun()
+                else:
+                    lcc=st.columns([3,2])
+                    lcc[0].caption(f"📈 Backtest as of **{asof}**")
+                    if lcc[1].button("↻ Update",key=f"upd_{t}",use_container_width=True,
+                                     help="Re-fetch latest prices and re-run the optimisation."):
+                        try: get_hist.clear()
+                        except Exception: pass
+                        st.session_state[f"optres_{t}"]=optimize_for_ticker(
+                            d,list(BT_STRATEGIES.keys()),split_frac=0.7,cost=bt_cost)
+                        st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                        st.rerun()
+                # --- bespoke on/off (needs data) ---
+                besp_on=st.toggle("🔬 Bespoke signal",key=f"besptog_{t}",disabled=not has,
+                    help=("Use this stock's own out-of-sample-tested rule for its signal, instead of the "
+                          "generic composite." if has else "Load backtest data first to enable."))
+                # derive the active override for THIS run (read before the downstream backtest section runs)
+                bespoke_disp=None
+                if has and besp_on:
+                    choice=st.session_state.get(f"bespoke_choice_{t}")
+                    if not choice:
+                        b0=max(ores["rows"],key=lambda r:r["test_ret"])
+                        choice=dict(strat=b0["strat"],buy=b0["buy"],sell=b0["sell"])
+                        st.session_state[f"bespoke_choice_{t}"]=choice
+                    st.session_state[f"bespoke_{t}"]=choice               # drives chart + backtest downstream
+                    rr=next((r for r in ores["rows"] if r["strat"]==choice["strat"]),None)
+                    if rr:
+                        posnow=strategy_positions(d,choice["strat"],choice["buy"],choice["sell"]).iloc[-1]
+                        rlabel=_opt_params_str(rr) if rr["tunable"] else BT_STRATEGIES[choice["strat"]][0]
+                        bespoke_disp=dict(long=float(posnow)>0.5,rule=rlabel,
+                                          oos=rr["test_ret"],bh=rr["bh_test"],beat=rr["test_beat"])
+                else:
+                    st.session_state.pop(f"bespoke_{t}",None)
+                st.markdown(score_card(t,d["strength"],d["state"],d["funda"],bespoke=bespoke_disp),
+                            unsafe_allow_html=True)
+                bdlbl=(f"🔢 Composite score {int(d['strength'])}/100" if bespoke_disp
+                       else f"🔢 How {int(d['strength'])}/100 is built")
+                if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
@@ -1265,6 +1324,7 @@ if tickers and (run or any(syms)):
                         with st.spinner(f"Searching {t}'s parameter space on the train half…"):
                             st.session_state[f"optres_{t}"]=optimize_for_ticker(
                                 d,opt_set,split_frac=split_pct/100,cost=bt_cost)
+                            st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                     ores=st.session_state.get(f"optres_{t}")
                     if ores and ores["rows"]:
                         st.markdown(optimize_table_html(ores),unsafe_allow_html=True)
@@ -1278,24 +1338,24 @@ if tickers and (run or any(syms)):
                                    f"(trained {ores['train_start']} → {ores['split_date']}, tested → "
                                    f"{ores['test_end']}). {msg}")
                         best_oos=max(ores["rows"],key=lambda r:r["test_ret"])
-                        opts=["—"]+[r["strat"] for r in ores["rows"]]
+                        opts=["★ best out-of-sample"]+[r["strat"] for r in ores["rows"]]
                         def _lbl(k):
-                            if k=="—": return "Keep global sidebar rule"
-                            nm=BT_STRATEGIES[k][0]
-                            return nm+("  ·  ★ best out-of-sample" if k==best_oos["strat"] else "")
-                        pick=st.selectbox(f"Lock a rule onto {t} (drives its signal, chart & backtest going forward)",
-                            opts,format_func=_lbl,key=f"lockpick_{t}")
-                        lc=st.columns(2)
-                        if lc[0].button(f"🔒 Apply to {t}",key=f"lockbtn_{t}",use_container_width=True):
-                            if pick=="—": st.session_state.pop(f"bespoke_{t}",None)
-                            else:
-                                rr=next(r for r in ores["rows"] if r["strat"]==pick)
-                                st.session_state[f"bespoke_{t}"]=dict(strat=rr["strat"],buy=rr["buy"],sell=rr["sell"])
+                            if k.startswith("★"): return f"★ best out-of-sample · {BT_STRATEGIES[best_oos['strat']][0]}"
+                            return BT_STRATEGIES[k][0]
+                        pick=st.selectbox(f"Preferred bespoke rule for {t}",opts,format_func=_lbl,key=f"lockpick_{t}",
+                            help="Which tuned rule the 🔬 Bespoke toggle uses. Defaults to the best out-of-sample performer.")
+                        if st.button(f"Set as {t}'s bespoke rule",key=f"lockbtn_{t}",use_container_width=True):
+                            rr=best_oos if pick.startswith("★") else next(r for r in ores["rows"] if r["strat"]==pick)
+                            st.session_state[f"bespoke_choice_{t}"]=dict(strat=rr["strat"],buy=rr["buy"],sell=rr["sell"])
                             st.rerun()
-                        if lc[1].button("↺ Clear bespoke",key=f"clr_{t}",use_container_width=True):
-                            st.session_state.pop(f"bespoke_{t}",None); st.rerun()
+                        cur=st.session_state.get(f"bespoke_choice_{t}")
+                        if cur:
+                            crr=next((r for r in ores["rows"] if r["strat"]==cur["strat"]),None)
+                            nm=(_opt_params_str(crr) if (crr and crr["tunable"]) else BT_STRATEGIES[cur["strat"]][0])
+                            st.caption(f"Preferred rule: **{nm}**. Flip **🔬 Bespoke signal** on {t}'s card to use it "
+                                       "for the live signal, price chart and backtest.")
                         st.caption("⚠️ Don't pick by the in-sample column — that's choosing the best curve-fit. "
-                                   "If you lock a rule, judge it by **out-of-sample** and keep re-testing.")
+                                   "Judge any locked rule by its **out-of-sample** number and keep re-testing.")
 
                 # ---- the REAL per-trade ledger (replaces eyeballing the chart) ----
                 tl=trade_log(d["o"],pos); ts=trade_log_stats(tl)

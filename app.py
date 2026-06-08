@@ -169,6 +169,19 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
   background:rgba(255,255,255,0.08) !important; border-radius:8px !important;
 }
+/* ---- per-ticker TABS: large, bold, readable (default is tiny & dim) ---- */
+[data-baseweb="tab-list"]{ gap:4px !important; flex-wrap:wrap !important; }
+button[data-baseweb="tab"]{ padding:8px 16px !important; }
+button[data-baseweb="tab"] p, button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p,
+[data-baseweb="tab"] [data-testid="stMarkdownContainer"]{
+  font-size:20px !important; font-weight:700 !important;
+  font-family:'Chakra Petch',sans-serif !important; color:#c7d0db !important; letter-spacing:.02em !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] p,
+button[data-baseweb="tab"][aria-selected="true"] div[data-testid="stMarkdownContainer"] p{
+  color:#16c784 !important;
+}
+[data-baseweb="tab-highlight"], [data-baseweb="tab-border"]{ background:#16c784 !important; height:3px !important; }
 /* ---- universal readable text: labels, captions, body all near-white ---- */
 label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
 .stMarkdown, .stMarkdown p, [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p,

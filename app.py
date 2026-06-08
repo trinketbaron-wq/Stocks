@@ -839,6 +839,16 @@ def score_card(tkr,strength,state,funda,bespoke=None):
     volcol=GREEN if (vc is not None and vc>=0) else (RED if vc is not None else MUTE)
     sub=(f"MCAP {money(funda.get('market_cap'))} · P/E {fnum(funda.get('pe'))} · "
          f"DIV {fpct(funda.get('div'))} · VOL <span style='color:{volcol}'>{voltxt}</span>")
+    # day price + change (from OHLCV — always available)
+    pr=funda.get("price"); chg=funda.get("chg")
+    chgcol=GREEN if (chg is not None and chg>=0) else (RED if chg is not None else MUTE)
+    priceline=""
+    if pr is not None:
+        chgtxt="" if chg is None else (f"<span style='color:{chgcol};font-size:14px;font-weight:600'> "
+                                       f"{'▲' if chg>=0 else '▼'} {abs(chg):.2f}%</span>")
+        priceline=(f"<div class='cardsub' style='font-family:\"IBM Plex Mono\",monospace;"
+                   f"font-size:18px;color:{TXT};margin:2px 0 4px'>${pr:,.2f}{chgtxt}</div>")
+    col=verdict_color(state)
     if bespoke:
         poscol=GREEN if bespoke["long"] else AMBER
         badge="LONG ▲" if bespoke["long"] else "CASH ■"
@@ -849,15 +859,18 @@ def score_card(tkr,strength,state,funda,bespoke=None):
         return f"""<div class="card" style="border-color:{AMBER}66">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{badge}</span>
+      {priceline}
       <div class="lab">α Alphawire · {bespoke['rule']} · historical return</div>
       <div class="num" style="color:{incol}">{bespoke['in_ret']:+.0f}%<span style="font-size:14px;color:{MUTE}"> vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
       <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
+      <div class="cardsub" style="margin-top:5px"><span style="color:{col};font-weight:700;font-size:14px">{state} · {int(strength)}/100</span><span style="color:{MUTE};font-size:11px"> composite score</span></div>
+      <div class="gauge"><span class="tick" style="left:calc({strength}% - 1.5px)"></span></div>
       <div class="cardsub">{sub}</div>
     </div>"""
-    col=verdict_color(state)
     return f"""<div class="card">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
+      {priceline}
       <div class="lab">strength</div>
       <div class="num" style="color:{col}">{int(strength)}<span style="font-size:16px;color:{MUTE}">/100</span></div>
       <div class="gauge"><span class="tick" style="left:calc({strength}% - 1.5px)"></span></div>
@@ -1729,6 +1742,11 @@ if tickers and (run or any(syms)):
             funda["vol_chg"]=(o.Volume.iloc[-1]/va-1)*100 if va and va==va else None
         except Exception:
             funda["vol_chg"]=None
+        try:
+            funda["price"]=float(o.Close.iloc[-1])
+            funda["chg"]=(float(o.Close.iloc[-1])/float(o.Close.iloc[-2])-1)*100 if len(o)>1 else 0.0
+        except Exception:
+            funda["price"]=funda["chg"]=None
         yrs=PERIOD_YEARS.get(period,2)
         news_items,news_src=get_company_news(t, period_years=yrs)
         titles=[n["title"] for n in news_items if n["title"]]

@@ -754,14 +754,15 @@ def fpct(x):
     x=float(x); x=x*100 if abs(x)<1 else x   # yfinance sometimes fraction, sometimes %
     return f"{x:.2f}%"
 
-def fundamentals_grid(f):
+def fundamentals_grid(f, accent=CYAN):
     cells=[("Market Cap",money(f["market_cap"])),("P/E (TTM)",fnum(f["pe"])),
            ("Fwd P/E",fnum(f["fpe"])),("EPS",fnum(f["eps"])),
            ("Div Yield",fpct(f["div"])),("Beta",fnum(f["beta"])),
            ("P/B",fnum(f["pb"])),("Profit Margin",fpct(f["margin"])),
            ("52W High",fnum(f["hi52"])),("52W Low",fnum(f["lo52"])),
            ("Avg Vol",human(f["avg_vol"])),("Volume",human(f["volume"]))]
-    inner="".join(f'<div class="fstat"><div class="k">{k}</div><div class="v">{v}</div></div>' for k,v in cells)
+    inner="".join(f'<div class="fstat" style="border-left:3px solid {accent}">'
+                  f'<div class="k">{k}</div><div class="v">{v}</div></div>' for k,v in cells)
     return f'<div class="fgrid">{inner}</div>'
 
 # ==========================================================================
@@ -1843,10 +1844,11 @@ if tickers and (run or any(syms)):
         for tab,(t,d) in zip(tabs,data.items()):
             with tab:
                 f=d["funda"]
+                acc=verdict_color(d["state"])
                 sect=" · ".join(x for x in [f.get("sector"),f.get("industry")] if x)
-                st.markdown(f"<div style='font-family:\"Chakra Petch\";font-size:15px;color:{TXT}'>{f.get('name',t)}"
+                st.markdown(f"<div style='font-family:\"Chakra Petch\";font-size:15px;color:{acc}'>{f.get('name',t)}"
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
-                st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
+                st.markdown(fundamentals_grid(f,accent=acc),unsafe_allow_html=True)
 
                 # ---- resolve the chosen backtest strategy ONCE (drives both chart + backtest) ----
                 # A per-ticker BESPOKE combination (locked from the optimizer) overrides the sidebar choice.

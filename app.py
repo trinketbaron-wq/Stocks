@@ -227,6 +227,14 @@ def alternating_signals(state):
         elif s=="SELL" and pos!=-1: sells.append(i); pos=-1
     return buys,sells
 
+def trade_markers(pos):
+    """Actual entries (flat->long, 0->1) and exits (long->flat, 1->0) of a backtest position series."""
+    p=pos.fillna(0.0).values
+    entries=[i for i in range(1,len(p)) if p[i]>0.5 and p[i-1]<=0.5]
+    exits=[i for i in range(1,len(p)) if p[i]<=0.5 and p[i-1]>0.5]
+    if len(p) and p[0]>0.5: entries=[0]+entries
+    return entries,exits
+
 # ==========================================================================
 # SENTIMENT + NEWS
 # ==========================================================================
@@ -617,10 +625,12 @@ def overlay_indicator(name, data):
     fig.update_layout(title=title)
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles"):
+def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None):
     d=o.tail(180)
-    buys,sells=alternating_signals(state_series)
-    idx=state_series.index
+    if trade_pos is not None:
+        buys,sells=trade_markers(trade_pos); idx=trade_pos.index   # actual backtested trades
+    else:
+        buys,sells=alternating_signals(state_series); idx=state_series.index
     bi=[i for i in buys if idx[i] in d.index]
     si=[i for i in sells if idx[i] in d.index]
     fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.05,row_heights=[0.7,0.3],
@@ -975,9 +985,11 @@ if tickers and (run or any(syms)):
         cards="".join(score_card(t,d["strength"],d["state"],d["funda"]) for t,d in data.items())
         st.markdown(f"<div class='cardwrap'>{cards}</div>",unsafe_allow_html=True)
         # tap to see how each score is built (opens a pop-up)
+        st.caption("Tap a ticker for its score breakdown:")
         bcols=st.columns(len(data))
         for c,(t,d) in zip(bcols,data.items()):
-            if c.button(f"🔢 {t} — how this score is built",key=f"bd_{t}",use_container_width=True):
+            if c.button(f"🔢 {t}",key=f"bd_{t}",use_container_width=True,
+                        help=f"How {t}'s strength score is built"):
                 show_breakdown(d,t)
 
         # MATRIX
@@ -999,29 +1011,7 @@ if tickers and (run or any(syms)):
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
 
-                # ---- price + signals (drawing tools always on; news markers; optional Fibonacci) ----
-                st.markdown("##### 📈 Price &amp; signals")
-                st.caption("Drawing tools live in the chart toolbar (top-right): line / path / rectangle / "
-                           "circle, and the eraser. Diamonds mark news, colored by sentiment."
-                           + (" Dotted amber lines are Fibonacci retracement levels." if show_fib else ""))
-                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
-                                    big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style),
-                                use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
-
-                # ---- financial results (revenue & net income) ----
-                fin=get_financials(t)
-                if fin and (fin["annual"] is not None or fin["quarterly"] is not None):
-                    with st.expander("📊 Financial results — revenue & net income"):
-                        if fin["annual"] is not None:
-                            st.plotly_chart(financials_chart(fin["annual"],t,f"{t} — annual"),
-                                            use_container_width=True,key=f"finA_{t}")
-                        if fin["quarterly"] is not None:
-                            st.plotly_chart(financials_chart(fin["quarterly"],t,f"{t} — quarterly"),
-                                            use_container_width=True,key=f"finQ_{t}")
-                        st.caption("Source: Yahoo. Free depth ≈ last 4 fiscal years and ~4–5 recent quarters "
-                                   "(full 5-year quarterly history requires a paid data feed).")
-
-                # ---- backtest: chosen strategy vs buy & hold ----
+                # ---- resolve the chosen backtest strategy ONCE (drives both chart + backtest) ----
                 if bt_strategy=="strength":
                     strat_name=f"Strength ≥{bt_buy} / ≤{bt_sell}"
                     rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {bt_buy}**, "
@@ -1040,9 +1030,33 @@ if tickers and (run or any(syms)):
                     strat_name="AlphaWire signal"
                     rule=("**Strategy:** hold while the signal is **BUY**, cash on **SELL** "
                           "(**HOLD** keeps the prior position) — the composite shown above.")
+                pos=strategy_positions(d,bt_strategy,bt_buy,bt_sell)
+
+                # ---- price chart: ACTUAL trades of the chosen strategy + drawing tools ----
+                st.markdown(f"##### 📈 Price &amp; trades — {strat_name}")
+                st.caption(f"▲/▼ mark where the **{strat_name}** strategy actually buys / sells (the trades "
+                           "the backtest below scores). Diamonds are news; toolbar (top-right) has drawing tools."
+                           + (" Dotted amber lines are Fibonacci levels." if show_fib else ""))
+                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
+                                    big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style,trade_pos=pos),
+                                use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
+
+                # ---- financial results (revenue & net income) ----
+                fin=get_financials(t)
+                if fin and (fin["annual"] is not None or fin["quarterly"] is not None):
+                    with st.expander("📊 Financial results — revenue & net income"):
+                        if fin["annual"] is not None:
+                            st.plotly_chart(financials_chart(fin["annual"],t,f"{t} — annual"),
+                                            use_container_width=True,key=f"finA_{t}")
+                        if fin["quarterly"] is not None:
+                            st.plotly_chart(financials_chart(fin["quarterly"],t,f"{t} — quarterly"),
+                                            use_container_width=True,key=f"finQ_{t}")
+                        st.caption("Source: Yahoo. Free depth ≈ last 4 fiscal years and ~4–5 recent quarters "
+                                   "(full 5-year quarterly history requires a paid data feed).")
+
+                # ---- backtest: chosen strategy vs buy & hold (strategy already resolved above) ----
                 st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
                 st.caption(rule)
-                pos=strategy_positions(d,bt_strategy,bt_buy,bt_sell)
                 bt=backtest(d["o"],pos,cost=bt_cost)
                 st.plotly_chart(equity_chart(bt,t,label=strat_name),use_container_width=True,key=f"eq_{t}")
                 edge=bt["strat_ret"]-bt["bh_ret"]
@@ -1058,9 +1072,15 @@ if tickers and (run or any(syms)):
                 verdict=("✅ Beat buy & hold over this window." if edge>0 else
                          "➖ Roughly matched buy & hold." if abs(edge)<2 else
                          "❌ Underperformed buy & hold here.")
-                st.caption(f"{verdict}  **In-sample** test on the window above, "
-                           f"{bt_cost*100:.2f}%/switch cost, next-day execution (no look-ahead). "
-                           "Tune the rule in the sidebar. Past results don't predict the future.")
+                why=""
+                if edge<-2:
+                    bits=[]
+                    if bt["exposure"]<70: bits.append(f"it sat in **cash {100-bt['exposure']:.0f}%** of the time, missing rallies")
+                    if bt["trades"]>=20: bits.append(f"**{bt['trades']} trades** racked up cost/whipsaw")
+                    why=" Here, "+" and ".join(bits)+"." if bits else ""
+                st.caption(f"{verdict}{why}  **In-sample** test, {bt_cost*100:.2f}%/switch cost, "
+                           "next-day execution (no look-ahead). Tune the rule in the sidebar; "
+                           "**most timing rules underperform buy & hold on a stock that mostly rose.**")
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)

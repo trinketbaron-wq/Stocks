@@ -1862,6 +1862,9 @@ if tickers and (run or any(syms)):
             const wrap=list.parentElement;
             const hl=wrap.querySelector('[data-baseweb="tab-highlight"]');
             if(hl) hl.style.setProperty('background',c,'important');
+            const bd=wrap.querySelector('[data-baseweb="tab-border"]');
+            if(bd) bd.style.setProperty('background',c,'important');
+            list.style.setProperty('border-bottom-color',c,'important');
             tabs.forEach((b,i)=>{{
               const p=b.querySelector('p')||b;
               p.style.setProperty('color', i===active? c : '#c7d0db','important');

@@ -840,7 +840,7 @@ def score_card(tkr,strength,state,funda,bespoke=None):
         return f"""<div class="card" style="border-color:{AMBER}66">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{badge}</span>
-      <div class="lab">🔬 {bespoke['rule']} · historical (in-sample) return</div>
+      <div class="lab">α Alphawire · {bespoke['rule']} · historical return</div>
       <div class="num" style="color:{incol}">{bespoke['in_ret']:+.0f}%<span style="font-size:14px;color:{MUTE}"> vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
       <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
       <div class="cardsub">{sub}</div>
@@ -1392,9 +1392,9 @@ def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke):
         rows.append(f"<tr>{cells}</tr>")
     TH=f"padding:6px 8px;color:{MUTE};font-size:10px;text-align:right;border-bottom:1px solid {GRID}"
     head=(f"<tr><th style='{TH};text-align:left'>Horizon</th><th style='{TH}'>Buy &amp; hold</th>"
-          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>🔬 Bespoke</th>" if has_bespoke else "")+"</tr>")
+          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>α Alphawire</th>" if has_bespoke else "")+"</tr>")
     note=(f"Extrapolates each strategy's <b>historical compound annual rate</b> "
-          f"(B&amp;H {cb:+.0f}%/yr, generic {cg:+.0f}%/yr"+(f", bespoke {cs:+.0f}%/yr" if has_bespoke else "")+
+          f"(B&amp;H {cb:+.0f}%/yr, generic {cg:+.0f}%/yr"+(f", Alphawire {cs:+.0f}%/yr" if has_bespoke else "")+
           "). NOT a forecast — it assumes the past rate simply continues, which it won't exactly.")
     return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
             f"<table style='width:100%;border-collapse:collapse;background:{BG};"
@@ -1597,7 +1597,7 @@ with st.sidebar:
     _user=st.session_state.get("user")
     if _user:
         st.success(f"👤 Signed in: **{_user}**")
-        if st.button("💾 Save watchlist + bespoke rules",use_container_width=True):
+        if st.button("💾 Save watchlist + Alphawire rules",use_container_width=True):
             wl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]
             wl=[s for s in wl if s]
             bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items()
@@ -1632,7 +1632,7 @@ with st.sidebar:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 
-    st.markdown("**🔬 Bespoke search**")
+    st.markdown("**α Alphawire search**")
     split_default=st.slider("Train on first __% of history",50,85,70,5,
         help="Percent of history (NOT days) used to TUNE each combination. The remaining % is held out as the "
              "out-of-sample test. 70 = tune on the older 70%, test on the most recent 30%.")
@@ -1805,13 +1805,13 @@ if tickers and (run or any(syms)):
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
                 # --- bespoke on/off (needs data) ---
-                st.toggle("🔬 Bespoke signal",key=f"besptog_{t}",disabled=not has,
+                st.toggle("α  Alphawire signal",key=f"besptog_{t}",disabled=not has,
                     help=("Use this stock's own out-of-sample-tested indicator combination for its signal, "
                           "instead of the generic composite." if has else "Load backtest data first to enable."))
                 # --- backtest-data lifecycle (below the card) ---
                 if not has:
                     if st.button("⚡ Load backtest data",key=f"load_{t}",use_container_width=True,
-                                 help="Search indicator combinations on this stock & out-of-sample-test them, enabling a bespoke signal."):
+                                 help="Search indicator combinations on this stock & out-of-sample-test them, enabling the Alphawire signal."):
                         with st.spinner(f"Searching {t} indicator combinations…"):
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
                                 d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
@@ -1852,8 +1852,8 @@ if tickers and (run or any(syms)):
                 # A per-ticker BESPOKE combination (locked from the optimizer) overrides the sidebar choice.
                 _bsp=st.session_state.get(f"bespoke_{t}")
                 if _bsp:
-                    strat_name="🔬 "+_bsp["label"]
-                    rule=(f"<span style='color:{AMBER}'>**Bespoke combination locked for {t}**</span> "
+                    strat_name="α "+_bsp["label"]
+                    rule=(f"<span style='color:{AMBER}'>**α Alphawire locked for {t}**</span> "
                           f"(the indicator mix that best fit its history) — overriding the sidebar. "
                           f"**Long when:** {_bsp['label']}.")
                     pos=combo_series(d["o"],_bsp["spec"],awn=d.get("awn"))
@@ -1940,7 +1940,7 @@ if tickers and (run or any(syms)):
                             unsafe_allow_html=True)
 
                 # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----
-                with st.expander(f"🔬 Find {t}'s best indicator combination — tested on data it never saw"):
+                with st.expander(f"α Build {t}'s Alphawire — best indicator combination, tested on unseen data"):
                     st.caption("Searches ~25 indicator primitives singly and in **AND / OR / 3-way combinations**, "
                                "tunes them on the **older** part of this stock's history, then scores each on the "
                                "**recent** held-out part. In-sample is the fit; the **out-of-sample column is the only "
@@ -1969,14 +1969,14 @@ if tickers and (run or any(syms)):
                         labels=[r["label"] for r in top]
                         pick=st.selectbox(f"Preferred combination for {t}",["★ best historical fit"]+labels,
                             key=f"lockpick_{t}",
-                            help="Which combination the 🔬 Bespoke toggle uses. Default = best fit on historical data.")
-                        if st.button(f"Set as {t}'s bespoke combination",key=f"lockbtn_{t}",use_container_width=True):
+                            help="Which combination the α Alphawire toggle uses. Default = best fit on historical data.")
+                        if st.button(f"Set as {t}'s Alphawire signal",key=f"lockbtn_{t}",use_container_width=True):
                             rr=ores["best"] if pick.startswith("★") else next(r for r in top if r["label"]==pick)
                             st.session_state[f"bespoke_choice_{t}"]=dict(spec=rr["spec"],label=rr["label"])
                             st.rerun()
                         cur=st.session_state.get(f"bespoke_choice_{t}")
                         if cur:
-                            st.caption(f"Preferred: **{cur['label']}**. The **🔬 Bespoke signal** toggle on {t}'s card uses it "
+                            st.caption(f"Preferred: **{cur['label']}**. The **α Alphawire signal** toggle on {t}'s card uses it "
                                        "for the live signal, price chart and backtest.")
                         st.caption("⚠️ A combo that beats B&amp;H **in-sample** but not **out-of-sample** is curve-fit "
                                    "to the past and won't carry forward. Judge by the out-of-sample column.")

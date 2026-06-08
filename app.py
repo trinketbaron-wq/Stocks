@@ -44,6 +44,19 @@ st.markdown(f"""
     radial-gradient(1200px 600px at 80% -10%, rgba(62,193,211,0.08), transparent 60%),
     radial-gradient(900px 500px at -10% 110%, rgba(22,199,132,0.07), transparent 55%),
     {BG}; color:{TXT}; }}
+/* ---- SIDEBAR forced dark (Streamlit defaults it to light → invisible labels) ---- */
+section[data-testid="stSidebar"], section[data-testid="stSidebar"] > div,
+[data-testid="stSidebar"] [data-testid="stSidebarContent"]{{ background:{BG} !important; }}
+section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] h4,
+section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"]{{ color:{TXT} !important; }}
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p{{ color:#b8c2cf !important; }}
+section[data-testid="stSidebar"] [data-testid="stExpander"]{{
+  background:#0d1622 !important; border:1px solid rgba(255,255,255,0.12) !important; }}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary{{ color:{TXT} !important; }}
 html,body,[class*="css"] {{ font-family:'IBM Plex Mono',monospace; }}
 h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.02em; }}
 /* hero */
@@ -91,6 +104,9 @@ hr {{ border-color:rgba(255,255,255,0.08); }}
 st.markdown("""
 <style>
 .stTextInput input, .stNumberInput input, .stTextArea textarea,
+[data-baseweb="input"], [data-baseweb="base-input"]{ background:#0d1622 !important; }
+[data-baseweb="input"] button, [data-baseweb="input"] [role="button"]{ background:#0d1622 !important; }
+[data-baseweb="input"] button svg{ fill:#9aa4b2 !important; }
 [data-baseweb="input"] input, [data-baseweb="base-input"] input {
   background:#0d1622 !important; color:#e6edf3 !important; -webkit-text-fill-color:#e6edf3 !important;
   border:1px solid rgba(255,255,255,0.12) !important;

@@ -235,6 +235,15 @@ def trade_markers(pos):
     if len(p) and p[0]>0.5: entries=[0]+entries
     return entries,exits
 
+def long_spans(pos):
+    """Contiguous (start,end) positional ranges where the position is long, for shading."""
+    p=pos.fillna(0.0).values; spans=[]; s=None
+    for i,x in enumerate(p):
+        if x>0.5 and s is None: s=i
+        elif x<=0.5 and s is not None: spans.append((s,i-1)); s=None
+    if s is not None: spans.append((s,len(p)-1))
+    return spans
+
 # ==========================================================================
 # SENTIMENT + NEWS
 # ==========================================================================
@@ -651,7 +660,7 @@ def overlay_indicator(name, data):
     return dark(fig, 380)
 
 def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None):
-    d=o.tail(180)
+    d=o if trade_pos is not None else o.tail(180)   # match the backtest window when showing trades
     if trade_pos is not None:
         buys,sells=trade_markers(trade_pos); idx=trade_pos.index   # actual backtested trades
     else:
@@ -668,6 +677,11 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
             name="px",increasing_line_color=GREEN,decreasing_line_color=RED),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA50,name="EMA50",line=dict(width=1,color=CYAN)),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA200,name="EMA200",line=dict(width=1,color=AMBER)),row=1,col=1)
+    if trade_pos is not None:   # shade spans where the strategy actually HELD the stock (dark = in cash)
+        tp=trade_pos.reindex(d.index).fillna(0.0)
+        for a,b in long_spans(tp):
+            fig.add_vrect(x0=d.index[a],x1=d.index[b],fillcolor=GREEN,opacity=0.07,
+                          line_width=0,layer="below",row=1,col=1)
     if fib:
         hi=float(d.High.max()); lo=float(d.Low.min()); rng=hi-lo
         for lvl in (0,0.236,0.382,0.5,0.618,0.786,1.0):
@@ -695,7 +709,7 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
             fig.add_trace(go.Scatter(x=xs,y=ys,mode="markers",name="news",
                 marker=dict(symbol="diamond",size=8,color=col,line=dict(width=0.5,color="#000")),
                 text=txt,hovertemplate="📰 %{text}<extra></extra>"),row=1,col=1)
-    s4=strength_series.tail(180)
+    s4=strength_series.reindex(d.index)
     fig.add_trace(go.Scatter(x=s4.index,y=s4,name="strength",
         line=dict(width=1.4,color=CYAN),fill="tozeroy",fillcolor="rgba(62,193,211,0.08)"),row=2,col=1)
     fig.update_layout(xaxis_rangeslider_visible=False, dragmode="zoom",
@@ -1057,9 +1071,10 @@ if tickers and (run or any(syms)):
 
                 # ---- price chart: ACTUAL trades of the chosen strategy + drawing tools ----
                 st.markdown(f"##### 📈 Price &amp; trades — {strat_name}")
-                st.caption(f"▲/▼ mark where the **{strat_name}** strategy actually buys / sells (the trades "
-                           "the backtest below scores). Diamonds are news; toolbar (top-right) has drawing tools."
-                           + (" Dotted amber lines are Fibonacci levels." if show_fib else ""))
+                st.caption(f"Full backtest window. ▲/▼ = where **{strat_name}** buys / sells; **green shading = "
+                           "holding the stock, dark = in cash.** Watch the dark gaps during rallies — that missed "
+                           "upside is usually why a strategy trails buy & hold. Diamonds are news; toolbar = drawing tools."
+                           + (" Dotted amber = Fibonacci." if show_fib else ""))
                 st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
                                     big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style,trade_pos=pos),
                                 use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")

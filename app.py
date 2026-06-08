@@ -399,10 +399,10 @@ def get_finnhub_news(symbol, days=365):
     out.sort(key=lambda x:x["dt"],reverse=True)
     return out[:40] or None
 
-def get_company_news(t, days=365):
-    """Finnhub if a key is set (dated, company-specific); else fall back to Yahoo."""
-    fh=get_finnhub_news(t,days)
-    if fh: return fh,"Finnhub"
+def get_company_news(t, period_years=1):
+    """Deep, staggered Finnhub history if a key is set (back `period_years`, ≥1yr); else Yahoo."""
+    deep=get_finnhub_news_range(t, years=max(period_years,1))
+    if deep: return deep,"Finnhub"
     yh=get_news(t)
     norm=[{"title":n.get("title",""),"source":n.get("publisher",""),"url":n.get("url",""),
            "when":n.get("when",""),"dt":0,"summary":""} for n in yh]
@@ -466,19 +466,22 @@ def material_news(items):
     return out
 
 @st.cache_data(ttl=3600,show_spinner=False)
-def get_finnhub_news_range(symbol, years=5, per_call_days=365, cap=900):
-    """Paginate Finnhub company-news year-by-year back `years` (free tier serves ~1yr/call)."""
+def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
+    """Paginate Finnhub company-news in ~quarterly windows back `years`, staggered across time.
+    Free tier only serves ~1yr of history, so we stop after consecutive empty windows
+    (the API has run dry) — that bounds calls and respects the 60/min rate limit."""
     key=st.secrets.get("FINNHUB_API_KEY")
     if not key: return None
-    import requests, datetime as _dt
+    import requests, datetime as _dt, time as _time
     end=_dt.date.today(); start_limit=end-_dt.timedelta(days=int(max(years,0.1)*365))
-    out={}; cur_to=end; calls=0
-    while cur_to>start_limit and calls<12:
+    out={}; cur_to=end; calls=0; empty_streak=0
+    while cur_to>start_limit and calls<26:
         cur_from=max(start_limit, cur_to-_dt.timedelta(days=per_call_days)); calls+=1
+        got=0
         try:
             r=requests.get("https://finnhub.io/api/v1/company-news",
                 params={"symbol":symbol,"from":str(cur_from),"to":str(cur_to),"token":key},timeout=15)
-            raw=r.json()
+            raw=r.json() if r.status_code==200 else []
         except Exception:
             raw=[]
         if isinstance(raw,list):
@@ -489,9 +492,12 @@ def get_finnhub_news_range(symbol, years=5, per_call_days=365, cap=900):
                 k2=(when,hl[:60])
                 if k2 in out: continue
                 out[k2]={"title":hl,"source":a.get("source","") or "","url":a.get("url","") or "",
-                         "when":when,"dt":ts,"summary":a.get("summary","") or ""}
+                         "when":when,"dt":ts,"summary":a.get("summary","") or ""}; got+=1
+        empty_streak = empty_streak+1 if got==0 else 0
+        if empty_streak>=2: break          # API has no more history this far back — stop
         cur_to=cur_from-_dt.timedelta(days=1)
         if len(out)>=cap: break
+        _time.sleep(0.2)                     # gentle on the 60/min free-tier limit
     items=sorted(out.values(),key=lambda x:x["dt"],reverse=True)
     return items or None
 
@@ -1723,22 +1729,28 @@ if tickers and (run or any(syms)):
             funda["vol_chg"]=(o.Volume.iloc[-1]/va-1)*100 if va and va==va else None
         except Exception:
             funda["vol_chg"]=None
-        news_items,news_src=get_company_news(t)
+        yrs=PERIOD_YEARS.get(period,2)
+        news_items,news_src=get_company_news(t, period_years=yrs)
         titles=[n["title"] for n in news_items if n["title"]]
-        scores=(llm_sentiment(titles,api_key) if (use_ai and api_key) else [vader(x) for x in titles]) if titles else []
+        scores=[vader(x) for x in titles]                       # per-item (display + marks); cheap
         moves=[price_move_after(o,n["when"]) for n in news_items]
-        news_avg=float(np.mean(scores)) if scores else 0.0
-        # news is a weighted vote folded into the LIVE score only (no daily history)
+        # LIVE sentiment uses only RECENT headlines (not years of history) so the verdict isn't diluted
+        _lastd=pd.Timestamp(o.index[-1]); _lastd=_lastd.tz_localize(None) if _lastd.tz is not None else _lastd
+        def _recent(w):
+            try: return (_lastd-pd.Timestamp(w)).days<=120
+            except Exception: return False
+        recent_titles=[n["title"] for n in news_items if n["title"] and _recent(n["when"])][:25] or titles[:20]
+        rscores=(llm_sentiment(recent_titles,api_key) if (use_ai and api_key)
+                 else [vader(x) for x in recent_titles]) if recent_titles else []
+        news_avg=float(np.mean(rscores)) if rscores else 0.0
         news_vote=1 if news_avg>0.1 else -1 if news_avg<-0.1 else 0
         live_comp=float(composite.iloc[-1]+WEIGHTS["news"]*news_vote)
         live_max=max_w+WEIGHTS["news"]
         lr=live_comp/live_max
         live_state="BUY" if lr>=BUY_TH else "SELL" if lr<=-BUY_TH else "HOLD"
         live_strength=round((lr+1)/2*100)
-        # ---- MULTI-YEAR MATERIAL NEWS: catalysts over years, correlated with the biggest price moves ----
-        yrs=PERIOD_YEARS.get(period,2)
-        hist_raw=get_finnhub_news_range(t,years=yrs) if news_src=="Finnhub" else None
-        mat=material_news(hist_raw) if hist_raw else material_news(news_items)
+        # ---- MULTI-YEAR MATERIAL NEWS from the SAME deep, staggered set ----
+        mat=material_news(news_items)
         big_moves=find_big_moves(o,window=3,top_n=14,min_pct=6.0,sep=8)
         move_rows=correlate_moves_news(big_moves,mat,window=4)
         kw_stats=news_keyword_stats(o,mat,fwd=5)
@@ -2099,7 +2111,7 @@ if tickers and (run or any(syms)):
                             st.caption("Finnhub returned no history for this symbol — showing Yahoo's recent feed instead.")
 
                 # ---- news: two-pane table + reaction summary ----
-                st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)
+                st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']} · {len(d['news'])} headlines</span>",unsafe_allow_html=True)
                 if d["titles"]:
                     sgn=np.sign(d["news_avg"]) if abs(d["news_avg"])>0.05 else 0
                     mom=d["strength_series"].iloc[-1]-50
@@ -2109,7 +2121,7 @@ if tickers and (run or any(syms)):
                     st.info(msg)
                     summary=news_reaction_summary(d["scores"],d["moves"])
                     if summary: st.markdown(f"**What tends to move {t}:** {summary}")
-                    st.markdown(news_table_html(d["news"][:14],d["scores"][:14],d["moves"][:14]),unsafe_allow_html=True)
+                    st.markdown(news_table_html(d["news"][:30],d["scores"][:30],d["moves"][:30]),unsafe_allow_html=True)
                     if not _has_finnhub:
                         st.caption("Tip: add a FINNHUB_API_KEY in Secrets for dated, company-specific news "
                                    "(~1yr free) — that powers the chart markers and the reaction stats above.")

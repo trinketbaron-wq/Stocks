@@ -609,9 +609,14 @@ def awn_series(o, material, half_life=5, fwd=5, scale=8.0):
     return awn, awn_long, awn_score
 
 def awn_latest(material):
-    """Most recent material catalyst (for the card readout)."""
-    md=[m for m in (material or []) if m.get("dt")]
-    return max(md,key=lambda m:m["dt"]) if md else None
+    """Most recent material catalyst (for the card readout). Robust to dt=0 (Yahoo) via 'when'."""
+    md=[m for m in (material or []) if (m.get("when") or m.get("dt"))]
+    if not md: return None
+    def _key(m):
+        if m.get("dt"): return float(m["dt"])
+        try: return pd.Timestamp(m["when"]).timestamp()
+        except Exception: return 0.0
+    return max(md,key=_key)
 
 def news_table_html(items, scores, moves):
     import html as _h

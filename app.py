@@ -259,6 +259,90 @@ def get_hist(t,period):
 def get_news(t,n=8):
     try: return [parse_news(x) for x in (yf.Ticker(t).news or [])[:n]]
     except Exception: return []
+
+@st.cache_data(ttl=900,show_spinner=False)
+def get_finnhub_news(symbol, days=365):
+    """Dated, company-specific news from Finnhub (needs FINNHUB_API_KEY in Secrets)."""
+    key=st.secrets.get("FINNHUB_API_KEY")
+    if not key: return None
+    import requests, datetime as _dt
+    to=_dt.date.today(); frm=to-_dt.timedelta(days=days)
+    try:
+        r=requests.get("https://finnhub.io/api/v1/company-news",
+            params={"symbol":symbol,"from":str(frm),"to":str(to),"token":key},timeout=12)
+        raw=r.json()
+    except Exception:
+        return None
+    if not isinstance(raw,list) or not raw: return None
+    out=[]
+    for a in raw:
+        ts=a.get("datetime")
+        when=_dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+        if a.get("headline"):
+            out.append({"title":a["headline"],"source":a.get("source","") or "",
+                "url":a.get("url","") or "","when":when,"dt":ts or 0,"summary":a.get("summary","") or ""})
+    out.sort(key=lambda x:x["dt"],reverse=True)
+    return out[:40] or None
+
+def get_company_news(t, days=365):
+    """Finnhub if a key is set (dated, company-specific); else fall back to Yahoo."""
+    fh=get_finnhub_news(t,days)
+    if fh: return fh,"Finnhub"
+    yh=get_news(t)
+    norm=[{"title":n.get("title",""),"source":n.get("publisher",""),"url":n.get("url",""),
+           "when":n.get("when",""),"dt":0,"summary":""} for n in yh]
+    return norm,"Yahoo"
+
+def _naive_idx(o):
+    idx=pd.to_datetime(o.index)
+    return idx.tz_localize(None) if idx.tz is not None else idx
+
+def price_move_after(o, when, horizon=3):
+    """% price change over `horizon` trading days after a news date (None if out of range)."""
+    if not when: return None
+    idx=_naive_idx(o)
+    pos=int(idx.searchsorted(pd.Timestamp(when)))
+    if pos>=len(idx)-1: return None
+    end=min(pos+horizon,len(idx)-1)
+    return (float(o.Close.iloc[end])/float(o.Close.iloc[pos])-1)*100
+
+def news_table_html(items, scores, moves):
+    import html as _h
+    rows=[]
+    for it,sc,mv in zip(items,scores,moves):
+        tag=("🟢 positive" if sc>0.05 else "🔴 negative" if sc<-0.05 else "⚪ neutral")
+        tcol=(GREEN if sc>0.05 else RED if sc<-0.05 else MUTE)
+        if mv is None:
+            react=f"<span style='color:{MUTE}'>price reaction n/a (too recent)</span>"
+        else:
+            mc=GREEN if mv>=0 else RED
+            rel=("aligned with the news" if (sc>0.05 and mv>0) or (sc<-0.05 and mv<0)
+                 else "moved against the news" if abs(sc)>0.05 and ((sc>0)!=(mv>0))
+                 else "little directional link")
+            react=f"<span style='color:{mc}'>{mv:+.1f}% over next 3 sessions</span> · {rel}"
+        title=_h.escape(it["title"]); src=_h.escape(it.get("source") or "")
+        meta=f"{src} · {it.get('when','')}"+(f" · <a href='{_h.escape(it['url'])}' style='color:{CYAN}'>open</a>" if it.get("url") else "")
+        left=f"<div style='font-size:13px;color:{TXT};line-height:1.35'>{title}</div><div style='color:{MUTE};font-size:11px;margin-top:3px'>{meta}</div>"
+        right=f"<div style='color:{tcol};font-size:12px;font-weight:600'>{tag}</div><div style='color:{MUTE};font-size:12px;margin-top:3px'>{react}</div>"
+        bd="border-bottom:1px solid rgba(255,255,255,0.06);padding:9px 10px;vertical-align:top"
+        rows.append(f"<tr><td style='{bd};width:56%'>{left}</td><td style='{bd}'>{right}</td></tr>")
+    head=(f"<th style='text-align:left;color:{MUTE};font-size:11px;letter-spacing:.08em;padding:6px 10px'>HEADLINE</th>"
+          f"<th style='text-align:left;color:{MUTE};font-size:11px;letter-spacing:.08em;padding:6px 10px'>AI SENTIMENT &amp; PRICE REACTION</th>")
+    return f"<table style='width:100%;border-collapse:collapse'><tr>{head}</tr>{''.join(rows)}</table>"
+
+def news_reaction_summary(scores, moves):
+    pairs=[(s,m) for s,m in zip(scores,moves) if m is not None]
+    if len(pairs)<3: return None
+    pos=[m for s,m in pairs if s>0.05]; neg=[m for s,m in pairs if s<-0.05]
+    parts=[]
+    if pos: parts.append(f"positive headlines were followed by an average **{np.mean(pos):+.1f}%** over the next 3 sessions (n={len(pos)})")
+    if neg: parts.append(f"negative headlines by **{np.mean(neg):+.1f}%** (n={len(neg)})")
+    if not parts: return None
+    body="Across the available window, "+"; ".join(parts)+"."
+    if pos and neg:
+        if abs(np.mean(neg))>abs(np.mean(pos))*1.3: body+=" This stock has reacted more sharply to **negative** news."
+        elif abs(np.mean(pos))>abs(np.mean(neg))*1.3: body+=" **Positive** news has tended to move it more."
+    return body
 @st.cache_data(ttl=900,show_spinner=False)
 def get_vix_hist(period):
     try:
@@ -507,7 +591,7 @@ def overlay_indicator(name, data):
     fig.update_layout(title=title)
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr, big=False):
+def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None):
     d=o.tail(180)
     buys,sells=alternating_signals(state_series)
     idx=state_series.index
@@ -527,6 +611,18 @@ def price_signals(o, state_series, strength_series, tkr, big=False):
         fig.add_trace(go.Scatter(x=[idx[i] for i in si],
             y=[o.High.loc[idx[i]]*1.015 for i in si],mode="markers",name="SELL",
             marker=dict(symbol="triangle-down",size=14,color=RED,line=dict(width=1,color="#600"))),row=1,col=1)
+    if news_marks:
+        ndt=_naive_idx(d); xs=[];ys=[];txt=[];col=[]
+        for when,sc,title in news_marks:
+            p=int(ndt.searchsorted(pd.Timestamp(when)))
+            if 0<=p<len(d):
+                xs.append(d.index[p]); ys.append(float(d.High.iloc[p])*1.03)
+                txt.append((title[:80]+"…") if len(title)>80 else title)
+                col.append(GREEN if sc>0.05 else RED if sc<-0.05 else MUTE)
+        if xs:
+            fig.add_trace(go.Scatter(x=xs,y=ys,mode="markers",name="news",
+                marker=dict(symbol="diamond",size=8,color=col,line=dict(width=0.5,color="#000")),
+                text=txt,hovertemplate="📰 %{text}<extra></extra>"),row=1,col=1)
     s4=strength_series.tail(180)
     fig.add_trace(go.Scatter(x=s4.index,y=s4,name="strength",
         line=dict(width=1.4,color=CYAN),fill="tozeroy",fillcolor="rgba(62,193,211,0.08)"),row=2,col=1)
@@ -734,9 +830,11 @@ if tickers and (run or any(syms)):
             funda["vol_chg"]=(o.Volume.iloc[-1]/va-1)*100 if va and va==va else None
         except Exception:
             funda["vol_chg"]=None
-        news=get_news(t)
-        titles=[n["title"] for n in news if n["title"]]
+        news_items,news_src=get_company_news(t)
+        titles=[n["title"] for n in news_items if n["title"]]
         scores=(llm_sentiment(titles,api_key) if (use_ai and api_key) else [vader(x) for x in titles]) if titles else []
+        moves=[price_move_after(o,n["when"]) for n in news_items]
+        news_marks=[(n["when"],sc,n["title"]) for n,sc in zip(news_items,scores) if n["when"]]
         news_avg=float(np.mean(scores)) if scores else 0.0
         # news is a weighted vote folded into the LIVE score only (no daily history)
         news_vote=1 if news_avg>0.1 else -1 if news_avg<-0.1 else 0
@@ -747,8 +845,9 @@ if tickers and (run or any(syms)):
         live_strength=round((lr+1)/2*100)
         data[t]=dict(o=o,votes=votes,strength=live_strength,state=live_state,
             strength_series=strength, state_series=state, vix_now=vix_now,
-            vix_series=vix_series, spy_series=spy_series, news=news, news_avg=news_avg,
-            news_vote=news_vote, scores=scores, titles=titles, funda=funda)
+            vix_series=vix_series, spy_series=spy_series, news=news_items, news_src=news_src,
+            news_avg=news_avg, news_vote=news_vote, scores=scores, titles=titles,
+            moves=moves, news_marks=news_marks, funda=funda)
         prog.progress((k+1)/len(tickers))
     prog.empty()
 
@@ -789,13 +888,14 @@ if tickers and (run or any(syms)):
                            f"→ ( {comp:+.1f}/{maxw:.0f} +1 )÷2 = **{d['strength']}/100** → **{d['state']}**. "
                            "VIX/News shift the live score; the historical chart uses the technical part only.")
 
-                # ---- price + signals (with drawing tools; expandable) ----
-                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t),
+                # ---- price + signals (with drawing tools + news markers; expandable) ----
+                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,news_marks=d["news_marks"]),
                                 use_container_width=True,config=PLOTLY_DRAW)
                 with st.expander("🔍 Expand chart + drawing tools"):
                     st.caption("Use the toolbar (top-right of the chart): the line / rectangle / circle / "
-                               "freehand icons draw on the chart; the eraser removes shapes.")
-                    st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,big=True),
+                               "freehand icons draw on the chart; the eraser removes shapes. "
+                               "Diamonds mark news, colored by sentiment.")
+                    st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,big=True,news_marks=d["news_marks"]),
                                     use_container_width=True,config=PLOTLY_DRAW,key=f"big_{t}")
 
                 # ---- financial results (revenue & net income) ----
@@ -832,19 +932,21 @@ if tickers and (run or any(syms)):
                            f"{bt_cost*100:.2f}%/switch costs and next-day execution (no look-ahead). "
                            "Weights aren't optimized; past results don't predict the future.")
 
+                # ---- news: two-pane table + reaction summary ----
+                st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)
                 if d["titles"]:
                     sgn=np.sign(d["news_avg"]) if abs(d["news_avg"])>0.05 else 0
-                    mom=d["strength_series"].iloc[-1]-50   # >0 bullish, <0 bearish
-                    if sgn==0: msg="📰 News roughly neutral."
-                    elif np.sign(mom)==sgn: msg=f"✅ News {'positive' if sgn>0 else 'negative'} — **confirms** the current price inertia."
-                    else: msg=f"⚠️ News {'positive' if sgn>0 else 'negative'} but momentum is {'up' if mom>0 else 'down'} — **divergence**, watch closely."
+                    mom=d["strength_series"].iloc[-1]-50
+                    if sgn==0: msg="📰 Recent news is roughly neutral overall."
+                    elif np.sign(mom)==sgn: msg=f"✅ Overall news {'positive' if sgn>0 else 'negative'} — **confirms** the current price trend."
+                    else: msg=f"⚠️ Overall news {'positive' if sgn>0 else 'negative'} but the trend is {'up' if mom>0 else 'down'} — **divergence**."
                     st.info(msg)
-                    with st.expander(f"{len(d['titles'])} headlines"):
-                        for n,sc in zip(d["news"],d["scores"]):
-                            tag="🟢" if sc>0.05 else "🔴" if sc<-0.05 else "⚪"
-                            line=f"{tag} **{sc:+.2f}** — {n['title']}"
-                            if n["url"]: line+=f"  \n<small>[{n['publisher'] or 'src'} · {n['when']}]({n['url']})</small>"
-                            st.markdown(line,unsafe_allow_html=True)
+                    summary=news_reaction_summary(d["scores"],d["moves"])
+                    if summary: st.markdown(f"**What tends to move {t}:** {summary}")
+                    st.markdown(news_table_html(d["news"][:14],d["scores"][:14],d["moves"][:14]),unsafe_allow_html=True)
+                    if d["news_src"]=="Yahoo":
+                        st.caption("Tip: add a FINNHUB_API_KEY in Secrets for dated, company-specific news "
+                                   "(~1yr free) — that powers the chart markers and the reaction stats above.")
                 else:
                     st.caption("No recent headlines for this ticker.")
 

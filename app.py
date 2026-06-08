@@ -527,15 +527,16 @@ def score_card(tkr,strength,state,funda,bespoke=None):
     if bespoke:
         poscol=GREEN if bespoke["long"] else AMBER
         badge="LONG ▲" if bespoke["long"] else "CASH ■"
-        beat=bespoke["beat"]; numcol=GREEN if beat else RED
-        tag=("✓ beat buy &amp; hold out-of-sample" if beat
-             else "✗ did NOT beat buy &amp; hold out-of-sample")
+        incol=GREEN if bespoke["in_beat"] else RED
+        oocol=GREEN if bespoke["beat"] else RED
+        in_tag=("beats B&amp;H" if bespoke["in_beat"] else "ties/▼ B&amp;H")
+        oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
         return f"""<div class="card" style="border-color:{AMBER}66">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{badge}</span>
-      <div class="lab">🔬 bespoke · out-of-sample return</div>
-      <div class="num" style="color:{numcol}">{bespoke['oos']:+.0f}%<span style="font-size:15px;color:{MUTE}"> vs B&amp;H {bespoke['bh']:+.0f}%</span></div>
-      <div class="cardsub" style="color:{numcol}">{bespoke['rule']} · {tag}</div>
+      <div class="lab">🔬 {bespoke['rule']} · historical (in-sample) return</div>
+      <div class="num" style="color:{incol}">{bespoke['in_ret']:+.0f}%<span style="font-size:14px;color:{MUTE}"> vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
+      <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
       <div class="cardsub">{sub}</div>
     </div>"""
     col=verdict_color(state)
@@ -910,6 +911,173 @@ def optimize_table_html(res):
             f"<table style='width:100%;border-collapse:collapse;background:{BG};"
             f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(body)}</table></div>")
 
+# ================= COMBINATORIAL BESPOKE ENGINE =================
+# A library of indicator "primitives" (each a long/flat 1-0 series), searched singly and in
+# AND / OR / 3-way combinations to hunt for whatever interaction best fit a stock's history.
+# Everything is chosen on the TRAIN half and reported on the held-out TEST half.
+
+def _hyst(x, buy, sell):
+    """Mean-reversion hysteresis: long when x<=buy (oversold), flat when x>=sell, carry between."""
+    raw=np.where(x<=buy,1.0,np.where(x>=sell,0.0,np.nan))
+    return pd.Series(raw,index=x.index).ffill().fillna(0.0)
+
+def primitive_catalog():
+    """Return list of primitive-ids. A pid is a tuple; _prim_series rebuilds its 1-0 series."""
+    pids=[("ema_cross",),("px_ema50",),("macd",),("di",),("obv",),("px_bbmid",),
+          ("adx_di",20),("adx_di",25)]
+    for b,s in [(30,70),(25,75),(35,65),(40,60)]: pids.append(("rsi",b,s))
+    for b,s in [(20,80),(30,70)]: pids.append(("stoch",b,s))
+    for b,s in [(20,80),(30,70)]: pids.append(("mfi",b,s))
+    for b,s in [(0.2,0.8),(0.1,0.9)]: pids.append(("pctb",b,s))
+    return pids
+
+def _prim_series(o, pid):
+    k=pid[0]
+    if k=="ema_cross": return (o["EMA50"]>=o["EMA200"]).astype(float)
+    if k=="px_ema50":  return (o["Close"]>=o["EMA50"]).astype(float)
+    if k=="macd":      return (o["MACD"]>=o["MACD_signal"]).astype(float)
+    if k=="di":        return (o["plus_DI"]>=o["minus_DI"]).astype(float)
+    if k=="obv":       return (o["OBV"]>=o["OBV"].rolling(20).mean()).astype(float)
+    if k=="px_bbmid":  return (o["Close"]>=o["BB_mid"]).astype(float)
+    if k=="adx_di":    return (((o["ADX"]>=pid[1])&(o["plus_DI"]>=o["minus_DI"]))).astype(float)
+    if k=="rsi":       return _hyst(o["RSI"],pid[1],pid[2])
+    if k=="stoch":     return _hyst(o["Stoch_K"],pid[1],pid[2])
+    if k=="mfi":       return _hyst(o["MFI"],pid[1],pid[2])
+    if k=="pctb":      return _hyst(o["PctB"],pid[1],pid[2])
+    return pd.Series(0.0,index=o.index)
+
+def _prim_label(pid):
+    k=pid[0]
+    return {"ema_cross":"EMA50≥200","px_ema50":"Px≥EMA50","macd":"MACD≥sig","di":"+DI≥−DI",
+            "obv":"OBV↑","px_bbmid":"Px≥BBmid"}.get(k) or (
+            f"ADX≥{pid[1]}&+DI" if k=="adx_di" else
+            f"RSI {pid[1]}/{pid[2]}" if k=="rsi" else
+            f"Stoch {pid[1]}/{pid[2]}" if k=="stoch" else
+            f"MFI {pid[1]}/{pid[2]}" if k=="mfi" else
+            f"%B {pid[1]}/{pid[2]}" if k=="pctb" else str(pid))
+
+def combo_series(o, spec):
+    """spec = {'op':'SINGLE'|'AND'|'OR','parts':[pid,...]} -> long/flat 1-0 series."""
+    parts=[_prim_series(o,p) for p in spec["parts"]]
+    if not parts: return pd.Series(0.0,index=o.index)
+    if spec["op"]=="OR":
+        s=parts[0]
+        for p in parts[1:]: s=((s+p)>0).astype(float)
+        return s
+    s=parts[0]                                   # SINGLE or AND
+    for p in parts[1:]: s=(s*p)
+    return s
+
+def combo_label(spec):
+    j={"AND":" & ","OR":" | ","SINGLE":""}.get(spec["op"]," & ")
+    return j.join(_prim_label(p) for p in spec["parts"])
+
+def optimize_combo_for_ticker(d, split_frac=0.7, cost=0.001, top_k=8, triples=True):
+    """Search singles + AND/OR pairs (+ 3-way ANDs of the top primitives). Pick the best by
+    TRAIN return; report each candidate's TEST return. Returns ranked rows + the best spec."""
+    o=d["o"]; n=len(o); k=_split_idx(n,split_frac)
+    tr_o, te_o = o.iloc[:k], o.iloc[k:]
+    cat=primitive_catalog()
+    cache={}
+    def full(pid):
+        if pid not in cache: cache[pid]=_prim_series(o,pid)
+        return cache[pid]
+    def evl(series):                              # train return for a full-length 1-0 series
+        return backtest(tr_o, series.iloc[:k], cost=cost)["strat_ret"]
+    # 1) singles
+    singles=[]
+    for pid in cat:
+        s=full(pid); r=evl(s); singles.append((r,{"op":"SINGLE","parts":[pid]}))
+    singles.sort(key=lambda x:x[0],reverse=True)
+    cand=list(singles)
+    topp=[sp["parts"][0] for _,sp in singles[:top_k]]
+    # 2) AND / OR pairs among the top primitives
+    for i in range(len(topp)):
+        for j in range(i+1,len(topp)):
+            a,b=topp[i],topp[j]
+            sand=full(a)*full(b); cand.append((evl(sand),{"op":"AND","parts":[a,b]}))
+            sor=((full(a)+full(b))>0).astype(float); cand.append((evl(sor),{"op":"OR","parts":[a,b]}))
+    # 3) 3-way ANDs among the very top
+    if triples:
+        for i in range(min(4,len(topp))):
+            for j in range(i+1,min(4,len(topp))):
+                for m in range(j+1,min(4,len(topp))):
+                    a,b,c=topp[i],topp[j],topp[m]
+                    s3=full(a)*full(b)*full(c); cand.append((evl(s3),{"op":"AND","parts":[a,b,c]}))
+    # build rows with train + test
+    rows=[]
+    for tr_ret,spec in cand:
+        ser=combo_series(o,spec)
+        bt_tr=backtest(tr_o,ser.iloc[:k],cost=cost); bt_te=backtest(te_o,ser.iloc[k:],cost=cost)
+        rows.append(dict(spec=spec,label=combo_label(spec),
+            train_ret=bt_tr["strat_ret"],test_ret=bt_te["strat_ret"],
+            bh_train=bt_tr["bh_ret"],bh_test=bt_te["bh_ret"],
+            train_beat=bt_tr["strat_ret"]>bt_tr["bh_ret"],test_beat=bt_te["strat_ret"]>bt_te["bh_ret"],
+            test_trades=bt_te["trades"],test_exp=bt_te["exposure"]))
+    # de-dup identical labels keeping best train, sort by train (the historical fit)
+    seen={}
+    for r in rows:
+        if r["label"] not in seen or r["train_ret"]>seen[r["label"]]["train_ret"]: seen[r["label"]]=r
+    rows=sorted(seen.values(),key=lambda r:r["train_ret"],reverse=True)
+    best=rows[0] if rows else None
+    return dict(rows=rows,best=best,k=k,n=n,n_tested=len(cand),
+        train_start=str(o.index[0])[:10],split_date=str(o.index[k])[:10],test_end=str(o.index[-1])[:10],
+        survivors=sum(r["test_beat"] for r in rows),total=len(rows))
+
+def combo_table_html(res, limit=12):
+    TD=f"padding:6px 9px;border-bottom:1px solid {GRID}"
+    TH=f"padding:7px 9px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid {GRID};vertical-align:bottom"
+    body=[]
+    for r in res["rows"][:limit]:
+        tc=GREEN if r["test_ret"]>=r["bh_test"] else RED
+        verdict=(f"<span style='color:{GREEN};font-weight:700'>beats</span>" if r["test_beat"]
+                 else f"<span style='color:{RED}'>misses</span>")
+        body.append(
+            f"<tr><td style='{TD};color:{TXT};font-family:\"IBM Plex Mono\",monospace;font-size:11px'>{r['label']}</td>"
+            f"<td style='{TD};color:{GREEN};text-align:right;font-weight:600'>{r['train_ret']:+.0f}%</td>"
+            f"<td style='{TD};color:{tc};text-align:right;font-weight:700'>{r['test_ret']:+.0f}%</td>"
+            f"<td style='{TD};color:{MUTE};text-align:right'>{r['bh_test']:+.0f}%</td>"
+            f"<td style='{TD};text-align:right'>{verdict}</td></tr>")
+    head=(f"<tr><th style='{TH}'>Indicator combination</th>"
+          f"<th style='{TH};text-align:right'>In-sample<br><span style='font-size:9px;color:{GREEN}'>fit · fantasy</span></th>"
+          f"<th style='{TH};text-align:right'>Out-of-sample<br><span style='font-size:9px;color:{AMBER}'>unseen · truth</span></th>"
+          f"<th style='{TH};text-align:right'>B&amp;H<br><span style='font-size:9px'>test</span></th>"
+          f"<th style='{TH};text-align:right'>vs B&amp;H</th></tr>")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(body)}</table></div>")
+
+# ---- forward PROJECTIONS (extrapolation of the historical compound rate — NOT a forecast) ----
+def _cagr(total_pct, n_bars):
+    yrs=max(n_bars,1)/252.0
+    base=1+total_pct/100.0
+    return (base**(1/yrs)-1)*100 if base>0 and yrs>0 else float("nan")
+
+PROJ_HORIZONS=[("1M",1/12),("3M",0.25),("6M",0.5),("1Y",1),("5Y",5),("10Y",10)]
+
+def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke):
+    cb,cg,cs=_cagr(bh_total,n_bars),_cagr(gen_total,n_bars),(_cagr(bsp_total,n_bars) if has_bespoke else None)
+    def proj(c,y):
+        if c is None or c!=c: return "—"
+        v=((1+c/100)**y-1)*100; col=GREEN if v>=0 else RED
+        return f"<span style='color:{col}'>{v:+.0f}%</span>"
+    TD=f"padding:5px 8px;border-bottom:1px solid {GRID};text-align:right"
+    rows=[]
+    for lbl,y in PROJ_HORIZONS:
+        cells=f"<td style='{TD};color:{MUTE};text-align:left'>{lbl}</td><td style='{TD}'>{proj(cb,y)}</td><td style='{TD}'>{proj(cg,y)}</td>"
+        if has_bespoke: cells+=f"<td style='{TD}'>{proj(cs,y)}</td>"
+        rows.append(f"<tr>{cells}</tr>")
+    TH=f"padding:6px 8px;color:{MUTE};font-size:10px;text-align:right;border-bottom:1px solid {GRID}"
+    head=(f"<tr><th style='{TH};text-align:left'>Horizon</th><th style='{TH}'>Buy &amp; hold</th>"
+          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>🔬 Bespoke</th>" if has_bespoke else "")+"</tr>")
+    note=(f"Extrapolates each strategy's <b>historical compound annual rate</b> "
+          f"(B&amp;H {cb:+.0f}%/yr, generic {cg:+.0f}%/yr"+(f", bespoke {cs:+.0f}%/yr" if has_bespoke else "")+
+          "). NOT a forecast — it assumes the past rate simply continues, which it won't exactly.")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(rows)}</table></div>"
+            f"<div style='color:{MUTE};font-size:10.5px;margin-top:5px'>{note}</div>")
+
 SCORE_LABELS={"trend50":"Price vs EMA50","trend200":"Price vs EMA200","cross":"EMA 50/200 cross",
  "di":"DI direction","rsi":"RSI","macd":"MACD","stoch":"Stochastic","boll":"Bollinger",
  "obv":"OBV","mfi":"MFI","rs":"Rel strength","vix":"VIX","news":"News"}
@@ -1055,9 +1223,16 @@ st.markdown("""
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
 with st.sidebar:
     st.header("⚙ Settings")
-    period=st.selectbox("History window",["1y","2y","5y"],index=1)
+    period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
+        help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 
-    st.markdown("**Backtest strategy**")
+    st.markdown("**🔬 Bespoke search**")
+    split_default=st.slider("Train on first __% of history",50,85,70,5,
+        help="Percent of history (NOT days) used to TUNE each combination. The remaining % is held out as the "
+             "out-of-sample test. 70 = tune on the older 70%, test on the most recent 30%.")
+    st.caption(f"Tuning on the oldest **{split_default}%**, testing on the newest **{100-split_default}%** (unseen).")
+
+    st.markdown("**Backtest strategy** (manual)")
     _keys=list(BT_STRATEGIES.keys())
     bt_strategy=st.selectbox("Rule to test",_keys,
         format_func=lambda k:BT_STRATEGIES[k][0],
@@ -1160,53 +1335,54 @@ if tickers and (run or any(syms)):
             with col:
                 ores=st.session_state.get(f"optres_{t}"); has=bool(ores and ores.get("rows"))
                 asof=st.session_state.get(f"optres_asof_{t}")
-                # --- backtest-data lifecycle ---
-                if not has:
-                    if st.button("⚡ Load backtest data",key=f"load_{t}",use_container_width=True,
-                                 help="Tune & out-of-sample-test rules on this stock so a bespoke signal becomes available."):
-                        with st.spinner(f"Backtesting {t}…"):
-                            st.session_state[f"optres_{t}"]=optimize_for_ticker(
-                                d,list(BT_STRATEGIES.keys()),split_frac=0.7,cost=bt_cost)
-                            st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
-                        st.rerun()
-                else:
-                    lcc=st.columns([3,2])
-                    lcc[0].caption(f"📈 Backtest as of **{asof}**")
-                    if lcc[1].button("↻ Update",key=f"upd_{t}",use_container_width=True,
-                                     help="Re-fetch latest prices and re-run the optimisation."):
-                        try: get_hist.clear()
-                        except Exception: pass
-                        st.session_state[f"optres_{t}"]=optimize_for_ticker(
-                            d,list(BT_STRATEGIES.keys()),split_frac=0.7,cost=bt_cost)
-                        st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
-                        st.rerun()
-                # --- bespoke on/off (needs data) ---
-                besp_on=st.toggle("🔬 Bespoke signal",key=f"besptog_{t}",disabled=not has,
-                    help=("Use this stock's own out-of-sample-tested rule for its signal, instead of the "
-                          "generic composite." if has else "Load backtest data first to enable."))
-                # derive the active override for THIS run (read before the downstream backtest section runs)
+                # toggle state is read BEFORE the card so the card reflects bespoke; the widget renders below
+                besp_on=bool(has and st.session_state.get(f"besptog_{t}",False))
                 bespoke_disp=None
-                if has and besp_on:
+                if besp_on:
                     choice=st.session_state.get(f"bespoke_choice_{t}")
                     if not choice:
-                        b0=max(ores["rows"],key=lambda r:r["test_ret"])
-                        choice=dict(strat=b0["strat"],buy=b0["buy"],sell=b0["sell"])
+                        b0=ores["best"]                                   # best HISTORICAL fit (no test peeking)
+                        choice=dict(spec=b0["spec"],label=b0["label"])
                         st.session_state[f"bespoke_choice_{t}"]=choice
                     st.session_state[f"bespoke_{t}"]=choice               # drives chart + backtest downstream
-                    rr=next((r for r in ores["rows"] if r["strat"]==choice["strat"]),None)
-                    if rr:
-                        posnow=strategy_positions(d,choice["strat"],choice["buy"],choice["sell"]).iloc[-1]
-                        rlabel=_opt_params_str(rr) if rr["tunable"] else BT_STRATEGIES[choice["strat"]][0]
-                        bespoke_disp=dict(long=float(posnow)>0.5,rule=rlabel,
-                                          oos=rr["test_ret"],bh=rr["bh_test"],beat=rr["test_beat"])
+                    rr=next((r for r in ores["rows"] if r["label"]==choice["label"]),ores["best"])
+                    posnow=combo_series(d["o"],rr["spec"]).iloc[-1]
+                    bespoke_disp=dict(long=float(posnow)>0.5,rule=rr["label"],
+                                      in_ret=rr["train_ret"],in_bh=rr["bh_train"],in_beat=rr["train_beat"],
+                                      oos=rr["test_ret"],bh=rr["bh_test"],beat=rr["test_beat"])
                 else:
                     st.session_state.pop(f"bespoke_{t}",None)
+                # --- card first ---
                 st.markdown(score_card(t,d["strength"],d["state"],d["funda"],bespoke=bespoke_disp),
                             unsafe_allow_html=True)
                 bdlbl=(f"🔢 Composite score {int(d['strength'])}/100" if bespoke_disp
                        else f"🔢 How {int(d['strength'])}/100 is built")
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
+                # --- bespoke on/off (needs data) ---
+                st.toggle("🔬 Bespoke signal",key=f"besptog_{t}",disabled=not has,
+                    help=("Use this stock's own out-of-sample-tested indicator combination for its signal, "
+                          "instead of the generic composite." if has else "Load backtest data first to enable."))
+                # --- backtest-data lifecycle (below the card) ---
+                if not has:
+                    if st.button("⚡ Load backtest data",key=f"load_{t}",use_container_width=True,
+                                 help="Search indicator combinations on this stock & out-of-sample-test them, enabling a bespoke signal."):
+                        with st.spinner(f"Searching {t} indicator combinations…"):
+                            st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
+                                d,split_frac=split_default/100,cost=bt_cost)
+                            st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                        st.rerun()
+                else:
+                    st.caption(f"📈 Backtest as of **{asof}** · {ores.get('n','?')} bars · {ores.get('n_tested','?')} combos tested")
+                    if st.button("↻ Update backtest data",key=f"upd_{t}",use_container_width=True,
+                                 help="Re-fetch latest prices and re-run the combination search."):
+                        try: get_hist.clear()
+                        except Exception: pass
+                        st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
+                            d,split_frac=split_default/100,cost=bt_cost)
+                        st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                        st.session_state.pop(f"bespoke_choice_{t}",None)
+                        st.rerun()
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
         st.markdown("#### Indicator matrix")
@@ -1228,34 +1404,35 @@ if tickers and (run or any(syms)):
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
 
                 # ---- resolve the chosen backtest strategy ONCE (drives both chart + backtest) ----
-                # A per-ticker BESPOKE rule (locked from the optimizer) overrides the global sidebar choice.
+                # A per-ticker BESPOKE combination (locked from the optimizer) overrides the sidebar choice.
                 _bsp=st.session_state.get(f"bespoke_{t}")
-                _strat=_bsp["strat"] if _bsp else bt_strategy
-                _buy  =_bsp["buy"]   if _bsp else bt_buy
-                _sell =_bsp["sell"]  if _bsp else bt_sell
-                if _strat=="strength":
-                    strat_name=f"Strength ≥{_buy} / ≤{_sell}"
-                    rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {_buy}**, "
-                          f"go to **cash when strength ≤ {_sell}** (hold in between).")
-                elif _strat=="rsi":
-                    strat_name=f"RSI ≤{_buy} / ≥{_sell}"
-                    rule=(f"**Strategy:** buy when **RSI ≤ {_buy}** (oversold), sell to cash when "
-                          f"**RSI ≥ {_sell}** (overbought) — a mean-reversion rule.")
-                elif _strat=="macd":
-                    strat_name="MACD cross"
-                    rule="**Strategy:** hold while the **MACD line is above its signal line**, cash when below."
-                elif _strat=="ema":
-                    strat_name="EMA 50/200 cross"
-                    rule="**Strategy:** hold while **EMA50 ≥ EMA200** (golden cross), cash on death cross."
-                else:
-                    strat_name="AlphaWire signal"
-                    rule=("**Strategy:** hold while the signal is **BUY**, cash on **SELL** "
-                          "(**HOLD** keeps the prior position) — the composite shown above.")
                 if _bsp:
-                    strat_name="🔬 "+strat_name
-                    rule=(f"<span style='color:{AMBER}'>**Bespoke rule locked for {t}**</span> "
-                          f"(tuned to its own history) — overriding the sidebar. "+rule)
-                pos=strategy_positions(d,_strat,_buy,_sell)
+                    strat_name="🔬 "+_bsp["label"]
+                    rule=(f"<span style='color:{AMBER}'>**Bespoke combination locked for {t}**</span> "
+                          f"(the indicator mix that best fit its history) — overriding the sidebar. "
+                          f"**Long when:** {_bsp['label']}.")
+                    pos=combo_series(d["o"],_bsp["spec"])
+                else:
+                    _strat,_buy,_sell=bt_strategy,bt_buy,bt_sell
+                    if _strat=="strength":
+                        strat_name=f"Strength ≥{_buy} / ≤{_sell}"
+                        rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {_buy}**, "
+                              f"go to **cash when strength ≤ {_sell}** (hold in between).")
+                    elif _strat=="rsi":
+                        strat_name=f"RSI ≤{_buy} / ≥{_sell}"
+                        rule=(f"**Strategy:** buy when **RSI ≤ {_buy}** (oversold), sell to cash when "
+                              f"**RSI ≥ {_sell}** (overbought) — a mean-reversion rule.")
+                    elif _strat=="macd":
+                        strat_name="MACD cross"
+                        rule="**Strategy:** hold while the **MACD line is above its signal line**, cash when below."
+                    elif _strat=="ema":
+                        strat_name="EMA 50/200 cross"
+                        rule="**Strategy:** hold while **EMA50 ≥ EMA200** (golden cross), cash on death cross."
+                    else:
+                        strat_name="AlphaWire signal"
+                        rule=("**Strategy:** hold while the signal is **BUY**, cash on **SELL** "
+                              "(**HOLD** keeps the prior position) — the composite shown above.")
+                    pos=strategy_positions(d,_strat,_buy,_sell)
 
                 # ---- price chart: ACTUAL trades of the chosen strategy + drawing tools ----
                 st.markdown(f"##### 📈 Price &amp; trades — {strat_name}")
@@ -1309,53 +1486,55 @@ if tickers and (run or any(syms)):
                            "next-day execution (no look-ahead). Tune the rule in the sidebar; "
                            "**most timing rules underperform buy & hold on a stock that mostly rose.**")
 
-                # ---- BESPOKE OPTIMIZER: fit each rule to this stock's past, then test it out-of-sample ----
-                with st.expander(f"🔬 Find {t}'s best-fit rule — and test it on data it never saw"):
-                    st.caption("Tunes each rule to the **early** part of this stock's history, then scores that "
-                               "exact rule on the **recent** part held out as unseen. The in-sample column is the "
-                               "fit; the **out-of-sample column is the only one that says anything about the future.** "
-                               "A big gap between them = curve-fitting.")
-                    oc=st.columns(2)
-                    split_pct=oc[0].slider("Train on first … of history",50,85,70,5,key=f"split_{t}",
-                        help="The remainder is held out as the out-of-sample test — a stand-in for the future.")
-                    opt_set=oc[1].multiselect("Rules to search",list(BT_STRATEGIES.keys()),
-                        default=list(BT_STRATEGIES.keys()),format_func=lambda k:BT_STRATEGIES[k][0],key=f"optset_{t}")
-                    if st.button(f"⚡ Optimise {t}",key=f"optrun_{t}",use_container_width=True) and opt_set:
-                        with st.spinner(f"Searching {t}'s parameter space on the train half…"):
-                            st.session_state[f"optres_{t}"]=optimize_for_ticker(
-                                d,opt_set,split_frac=split_pct/100,cost=bt_cost)
+                # ---- forward projections: 1M–10Y, generic signal vs bespoke vs buy & hold ----
+                _gen_bt=backtest(d["o"],strategy_positions(d,"signal",72,42),cost=bt_cost)
+                _has_bsp=bool(_bsp)
+                st.markdown("##### 🔮 Projected potential — 1M to 10Y")
+                st.markdown(projection_table_html(bt["bh_ret"],_gen_bt["strat_ret"],
+                            (bt["strat_ret"] if _has_bsp else None),len(d["o"]),_has_bsp),
+                            unsafe_allow_html=True)
+
+                # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----
+                with st.expander(f"🔬 Find {t}'s best indicator combination — tested on data it never saw"):
+                    st.caption("Searches ~25 indicator primitives singly and in **AND / OR / 3-way combinations**, "
+                               "tunes them on the **older** part of this stock's history, then scores each on the "
+                               "**recent** held-out part. In-sample is the fit; the **out-of-sample column is the only "
+                               "one that says anything about the future.** A big gap = curve-fitting.")
+                    split_pct=st.slider("Train on first __% of history",50,85,split_default,5,key=f"split_{t}",
+                        help="Percent of history (not days) used to tune. The rest is the out-of-sample test.")
+                    if st.button(f"⚡ Search {t} combinations",key=f"optrun_{t}",use_container_width=True):
+                        with st.spinner(f"Searching {t} indicator combinations on the train split…"):
+                            st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
+                                d,split_frac=split_pct/100,cost=bt_cost)
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                            st.session_state.pop(f"bespoke_choice_{t}",None)
                     ores=st.session_state.get(f"optres_{t}")
                     if ores and ores["rows"]:
-                        st.markdown(optimize_table_html(ores),unsafe_allow_html=True)
+                        st.markdown(combo_table_html(ores,limit=12),unsafe_allow_html=True)
                         surv,tot=ores["survivors"],ores["total"]
-                        msg=("**None** survived — the glittering in-sample fits were curve-fit to this stock's "
-                             "past and fell apart on unseen data. That is the trap, made visible."
+                        msg=("**None** beat buy &amp; hold out-of-sample — the glittering in-sample fits were curve-fit "
+                             "to this stock's past and fell apart on unseen data. That is the trap, made visible."
                              if surv==0 else
-                             f"These held an edge on data they were never tuned on — promising, but re-check as "
-                             "fresh data arrives; an edge can fade.")
-                        st.caption(f"**{surv} of {tot}** rules beat buy &amp; hold **out-of-sample** "
-                                   f"(trained {ores['train_start']} → {ores['split_date']}, tested → "
-                                   f"{ores['test_end']}). {msg}")
-                        best_oos=max(ores["rows"],key=lambda r:r["test_ret"])
-                        opts=["★ best out-of-sample"]+[r["strat"] for r in ores["rows"]]
-                        def _lbl(k):
-                            if k.startswith("★"): return f"★ best out-of-sample · {BT_STRATEGIES[best_oos['strat']][0]}"
-                            return BT_STRATEGIES[k][0]
-                        pick=st.selectbox(f"Preferred bespoke rule for {t}",opts,format_func=_lbl,key=f"lockpick_{t}",
-                            help="Which tuned rule the 🔬 Bespoke toggle uses. Defaults to the best out-of-sample performer.")
-                        if st.button(f"Set as {t}'s bespoke rule",key=f"lockbtn_{t}",use_container_width=True):
-                            rr=best_oos if pick.startswith("★") else next(r for r in ores["rows"] if r["strat"]==pick)
-                            st.session_state[f"bespoke_choice_{t}"]=dict(strat=rr["strat"],buy=rr["buy"],sell=rr["sell"])
+                             "These held an edge on data they were never tuned on — promising, but re-check as fresh "
+                             "data arrives; an edge can fade.")
+                        st.caption(f"Tested **{ores['n_tested']}** combinations on **{ores['n']}** bars. "
+                                   f"**{surv} of {tot}** beat buy &amp; hold **out-of-sample** "
+                                   f"(trained {ores['train_start']} → {ores['split_date']}, tested → {ores['test_end']}). {msg}")
+                        top=ores["rows"][:12]
+                        labels=[r["label"] for r in top]
+                        pick=st.selectbox(f"Preferred combination for {t}",["★ best historical fit"]+labels,
+                            key=f"lockpick_{t}",
+                            help="Which combination the 🔬 Bespoke toggle uses. Default = best fit on historical data.")
+                        if st.button(f"Set as {t}'s bespoke combination",key=f"lockbtn_{t}",use_container_width=True):
+                            rr=ores["best"] if pick.startswith("★") else next(r for r in top if r["label"]==pick)
+                            st.session_state[f"bespoke_choice_{t}"]=dict(spec=rr["spec"],label=rr["label"])
                             st.rerun()
                         cur=st.session_state.get(f"bespoke_choice_{t}")
                         if cur:
-                            crr=next((r for r in ores["rows"] if r["strat"]==cur["strat"]),None)
-                            nm=(_opt_params_str(crr) if (crr and crr["tunable"]) else BT_STRATEGIES[cur["strat"]][0])
-                            st.caption(f"Preferred rule: **{nm}**. Flip **🔬 Bespoke signal** on {t}'s card to use it "
+                            st.caption(f"Preferred: **{cur['label']}**. The **🔬 Bespoke signal** toggle on {t}'s card uses it "
                                        "for the live signal, price chart and backtest.")
-                        st.caption("⚠️ Don't pick by the in-sample column — that's choosing the best curve-fit. "
-                                   "Judge any locked rule by its **out-of-sample** number and keep re-testing.")
+                        st.caption("⚠️ A combo that beats B&amp;H **in-sample** but not **out-of-sample** is curve-fit "
+                                   "to the past and won't carry forward. Judge by the out-of-sample column.")
 
                 # ---- the REAL per-trade ledger (replaces eyeballing the chart) ----
                 tl=trade_log(d["o"],pos); ts=trade_log_stats(tl)

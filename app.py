@@ -107,8 +107,28 @@ st.markdown("""
 [data-baseweb="tag"] { background:rgba(22,199,132,0.22) !important; color:#e6edf3 !important; }
 [data-baseweb="tag"] svg { fill:#e6edf3 !important; }
 input::placeholder, textarea::placeholder { color:#7d8694 !important; }
-/* selection pills/chips */
-[data-testid="stPills"] button, .stPills button { color:#e6edf3 !important; }
+/* ---- buttons: primary stays red; secondary forced dark & readable ---- */
+.stButton > button[kind="primary"], [data-testid="stBaseButton-primary"]{
+  background:#ea3943 !important; color:#fff !important; border:0 !important;
+}
+.stButton > button[kind="secondary"], [data-testid="stBaseButton-secondary"]{
+  background:#0d1622 !important; color:#e6edf3 !important;
+  border:1px solid rgba(255,255,255,0.18) !important;
+}
+.stButton > button[kind="secondary"]:hover, [data-testid="stBaseButton-secondary"]:hover{
+  border-color:#3ec1d3 !important; color:#fff !important;
+}
+/* ---- selection pills/chips: dark bg, light text; selected = green ---- */
+[data-testid="stPills"] button, .stPills button, [data-baseweb="pill"]{
+  background:#0d1622 !important; color:#cfd6df !important;
+  border:1px solid rgba(255,255,255,0.18) !important;
+}
+[data-testid="stPills"] button[aria-selected="true"],
+[data-testid="stPills"] button[kind="primary"],
+[data-testid="stPills"] button[aria-pressed="true"]{
+  background:rgba(22,199,132,0.18) !important; color:#16c784 !important;
+  border-color:#16c784 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -124,7 +144,7 @@ def dark(fig, h=420):
 
 # modebar config that turns on drawing tools (trend lines, boxes, freehand, erase)
 PLOTLY_DRAW={"displaylogo":False,"scrollZoom":True,
-    "modeBarButtonsToAdd":["drawline","drawopenpath","drawrect","drawcircle","eraseshape"]}
+    "modeBarButtonsToAdd":["drawline","drawopenpath","drawclosedpath","drawrect","drawcircle","eraseshape"]}
 # INDICATOR MATH
 # ==========================================================================
 def ema(s,n): return s.ewm(span=n,adjust=False).mean()
@@ -466,7 +486,13 @@ def fetch_movers(universe_name):
     close=close.dropna(how="all")
     if len(close)<2: return None
     chg=(close.iloc[-1]/close.iloc[-2]-1)*100
-    out=pd.DataFrame({"ticker":chg.index,"chg":chg.values,"price":close.iloc[-1].values}).dropna()
+    vol=None
+    if "Volume" in df.columns.get_level_values(0):
+        v=df["Volume"]
+        if isinstance(v,pd.Series): v=v.to_frame()
+        vol=v.reindex(columns=close.columns).iloc[-1]
+    out=pd.DataFrame({"ticker":chg.index,"chg":chg.values,"price":close.iloc[-1].values,
+        "volume":(vol.values if vol is not None else np.nan)}).dropna(subset=["chg","price"])
     out=out.reindex(out["chg"].abs().sort_values(ascending=False).index)  # biggest movers first
     return out.reset_index(drop=True)
 
@@ -591,7 +617,7 @@ def overlay_indicator(name, data):
     fig.update_layout(title=title)
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None):
+def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False):
     d=o.tail(180)
     buys,sells=alternating_signals(state_series)
     idx=state_series.index
@@ -603,6 +629,13 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         name="px",increasing_line_color=GREEN,decreasing_line_color=RED),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA50,name="EMA50",line=dict(width=1,color=CYAN)),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA200,name="EMA200",line=dict(width=1,color=AMBER)),row=1,col=1)
+    if fib:
+        hi=float(d.High.max()); lo=float(d.Low.min()); rng=hi-lo
+        for lvl in (0,0.236,0.382,0.5,0.618,0.786,1.0):
+            y=hi-rng*lvl
+            fig.add_hline(y=y,line=dict(color="rgba(245,166,35,0.45)",width=1,dash="dot"),
+                annotation_text=f"{lvl*100:.1f}%  {y:.2f}",annotation_position="right",
+                annotation_font=dict(size=9,color=AMBER),row=1,col=1)
     if bi:
         fig.add_trace(go.Scatter(x=[idx[i] for i in bi],
             y=[o.Low.loc[idx[i]]*0.985 for i in bi],mode="markers",name="BUY",
@@ -630,13 +663,22 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         newshape=dict(line=dict(color=AMBER,width=2)))
     return dark(fig, 820 if big else 560)
 
-def backtest(o, state_series, cost=0.001):
-    """Long/flat timing test of the BUY/HOLD/SELL signal vs buy & hold.
-    NO LOOK-AHEAD: the signal is read at a day's close, so the position only
-    takes effect the NEXT bar (pos.shift(1)). A cost is charged on every switch.
+def strategy_positions(d, strategy, buy_th=75, sell_th=49):
+    """Build a raw long(1)/flat(0) position series for the chosen backtest strategy."""
+    if strategy=="strength":
+        s=d["strength_series"]
+        raw=np.where(s>=buy_th,1.0,np.where(s<=sell_th,0.0,np.nan))
+        return pd.Series(raw,index=s.index).ffill().fillna(0.0)
+    # default: the AlphaWire BUY/HOLD/SELL signal
+    return d["state_series"].map({"BUY":1.0,"SELL":0.0,"HOLD":np.nan}).ffill().fillna(0.0)
+
+def backtest(o, pos, cost=0.001):
+    """Long/flat timing test of a position series vs buy & hold.
+    NO LOOK-AHEAD: positions are decided at a day's close, so they only take
+    effect the NEXT bar (pos.shift(1)). A cost is charged on every switch.
     """
     ret=o.Close.pct_change().fillna(0.0)
-    pos=state_series.map({"BUY":1.0,"SELL":0.0,"HOLD":np.nan}).ffill().fillna(0.0)
+    pos=pos.reindex(ret.index).ffill().fillna(0.0)
     pos_eff=pos.shift(1).fillna(0.0)                 # act the day AFTER the signal
     switch=pos_eff.diff().abs().fillna(0.0)
     strat=pos_eff*ret - switch*cost                  # subtract trading cost on switches
@@ -654,13 +696,13 @@ def backtest(o, state_series, cost=0.001):
         strat_sharpe=shp(strat), bh_sharpe=shp(ret),
         trades=int((switch>1e-9).sum()), exposure=float(pos_eff.mean())*100)
 
-def equity_chart(bt, tkr):
+def equity_chart(bt, tkr, label="Strategy"):
     e=bt["eq"]/bt["eq"].iloc[0]*100; b=bt["bh"]/bt["bh"].iloc[0]*100
     fig=go.Figure()
     fig.add_trace(go.Scatter(x=b.index,y=b,name="Buy & hold",line=dict(width=1.4,color=MUTE)))
-    fig.add_trace(go.Scatter(x=e.index,y=e,name="AlphaWire signals",line=dict(width=2,color=GREEN),
+    fig.add_trace(go.Scatter(x=e.index,y=e,name=label,line=dict(width=2,color=GREEN),
         fill="tonexty",fillcolor="rgba(22,199,132,0.06)"))
-    fig.update_layout(title=f"{tkr} — $100 invested: signals vs buy &amp; hold")
+    fig.update_layout(title=f"{tkr} — $100 invested: {label} vs buy &amp; hold")
     return dark(fig,360)
 
 SCORE_LABELS={"trend50":"Price vs EMA50","trend200":"Price vs EMA200","cross":"EMA 50/200 cross",
@@ -677,8 +719,9 @@ def score_breakdown(d):
     fig=go.Figure(go.Bar(x=s.values,y=labels,orientation="h",marker_color=colors,
         text=[f"{x:+.1f}" for x in s.values],textposition="outside",cliponaxis=False))
     fig.update_layout(title="Contribution to score (points = vote × weight)",
-        xaxis_title="points",yaxis=dict(autorange="reversed"))
+        xaxis_title="points",yaxis=dict(autorange="reversed"),dragmode=False)
     fig=dark(fig,420)
+    fig.update_xaxes(fixedrange=True); fig.update_yaxes(fixedrange=True)
     comp=float(s.sum()); maxw=float(sum(abs(w) for w in WEIGHTS.values()))
     strength=round((comp/maxw+1)/2*100)
     return fig,comp,maxw,strength
@@ -703,12 +746,19 @@ def render_movers():
     show=top.copy()
     show["chg"]=show["chg"].map(lambda x:f"{x:+.2f}%")
     show["price"]=show["price"].map(lambda x:f"{x:,.2f}")
-    show.columns=["Ticker","% move","Price"]
+    if "volume" in show.columns:
+        show["volume"]=show["volume"].map(lambda x:human(x) if pd.notna(x) else "—")
+        show=show[["ticker","chg","price","volume"]]
+        show.columns=["Ticker","% move","Price","Volume"]
+    else:
+        show=show[["ticker","chg","price"]]; show.columns=["Ticker","% move","Price"]
     csscol=pd.DataFrame("",index=show.index,columns=show.columns)
     for i in show.index:
         c=GREEN if top.loc[i,"chg"]>=0 else RED
         csscol.loc[i,"% move"]=f"color:{c};font-weight:600"
     st.dataframe(show.style.apply(lambda _:csscol,axis=None),use_container_width=True,height=260,hide_index=True)
+    st.caption("A live AlphaWire **score** needs each name's full price history, so it's computed once "
+               "you load picks below (it then appears in the comparison matrix).")
     st.markdown("**👇 Tap up to 5 tickers to select them:**")
     chgmap=dict(zip(top["ticker"],top["chg"]))
     opts=top["ticker"].head(28).tolist()   # tappable chips for the top movers
@@ -728,6 +778,21 @@ def render_movers():
 
 # real modal if available (Streamlit >=1.37), else inline fallback
 _open_movers = st.dialog("📈 Market Movers")(render_movers) if hasattr(st,"dialog") else render_movers
+
+def _breakdown_body(d, t):
+    bfig,comp,maxw,bstr=score_breakdown(d)
+    st.markdown(f"**{t}** · strength **{int(d['strength'])}/100** · **{d['state']}**")
+    st.plotly_chart(bfig,use_container_width=True,config={"displayModeBar":False})
+    st.markdown(f"Sum of contributions = **{comp:+.1f}** of ±{maxw:.0f} possible "
+                f"→ ( {comp:+.1f}/{maxw:.0f} + 1 ) ÷ 2 = **{bstr}/100**. "
+                "Each bar is one indicator's vote (−1/0/+1) × its weight. "
+                "VIX & News only shift the live score; the historical chart uses the technical part.")
+if hasattr(st,"dialog"):
+    @st.dialog("🔢 How this score is built")
+    def show_breakdown(d, t): _breakdown_body(d, t)
+else:
+    def show_breakdown(d, t):
+        with st.expander(f"🔢 How {t}'s score is built",expanded=True): _breakdown_body(d, t)
 
 def pick_indicator():
     """Reliable tappable chips (falls back to a dropdown on older Streamlit)."""
@@ -784,8 +849,25 @@ api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
 with st.sidebar:
     st.header("⚙ Settings")
     period=st.selectbox("History window",["1y","2y","5y"],index=1)
-    bt_cost=st.slider("Backtest trade cost (% per switch)",0.0,0.5,0.10,0.05,
+
+    st.markdown("**Backtest strategy**")
+    bt_strategy_label=st.selectbox("Rule to test",
+        ["AlphaWire signal (BUY / SELL)","Strength threshold"],
+        help="What decides when the backtest is long vs in cash.")
+    bt_strategy="strength" if bt_strategy_label.startswith("Strength") else "signal"
+    if bt_strategy=="strength":
+        bt_buy=st.slider("Go long when strength ≥",50,95,75,1)
+        bt_sell=st.slider("Go to cash when strength ≤",5,60,49,1)
+        if bt_sell>=bt_buy: st.caption("⚠️ Sell level should be below buy level.")
+    else:
+        bt_buy,bt_sell=75,49
+    bt_cost=st.slider("Trade cost (% per switch)",0.0,0.5,0.10,0.05,
         help="Charged each time the strategy moves in or out of the stock.")/100
+
+    show_fib=st.toggle("Fibonacci levels on charts",value=False,
+        help="Auto-draws retracement lines from the visible swing high/low. "
+             "(Plotly has no freehand Fib tool; use the line tool for custom ones.)")
+
     use_ai=st.toggle("Claude news sentiment",value=bool(api_key),disabled=not api_key,
         help="Add ANTHROPIC_API_KEY in Secrets to enable AI-graded news.") if api_key else False
     if not api_key: st.caption("ℹ️ Using built-in finance sentiment analyzer.")
@@ -803,8 +885,10 @@ syms=[cols[i].text_input(f"#{i+1}",key=f"sym{i}",label_visibility="collapsed",
       placeholder=f"#{i+1}") for i in range(5)]
 b1,b2=st.columns([2,1])
 run=b1.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
-if b2.button("🔎 Browse market movers",use_container_width=True):
+if b2.button("🔎 Screener: find & add stocks",use_container_width=True):
     _open_movers()
+st.caption("The screener ranks index movers (price, % move, volume) — tap names there to fill the boxes above, "
+           "then Run to score them.")
 
 tickers=[]
 for s in syms:
@@ -860,6 +944,11 @@ if tickers and (run or any(syms)):
         # SCORE CARDS
         cards="".join(score_card(t,d["strength"],d["state"],d["funda"]) for t,d in data.items())
         st.markdown(f"<div class='cardwrap'>{cards}</div>",unsafe_allow_html=True)
+        # tap to see how each score is built (opens a pop-up)
+        bcols=st.columns(len(data))
+        for c,(t,d) in zip(bcols,data.items()):
+            if c.button(f"🔢 {t} — how this score is built",key=f"bd_{t}",use_container_width=True):
+                show_breakdown(d,t)
 
         # MATRIX
         st.markdown("#### Indicator matrix")
@@ -880,23 +969,14 @@ if tickers and (run or any(syms)):
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
 
-                # ---- score breakdown: what builds the rating number ----
-                st.markdown("##### 🔢 How this score is built")
-                bfig,comp,maxw,bstr=score_breakdown(d)
-                st.plotly_chart(bfig,use_container_width=True)
-                st.caption(f"Sum of contributions = **{comp:+.1f}** out of ±{maxw:.0f} possible "
-                           f"→ ( {comp:+.1f}/{maxw:.0f} +1 )÷2 = **{d['strength']}/100** → **{d['state']}**. "
-                           "VIX/News shift the live score; the historical chart uses the technical part only.")
-
-                # ---- price + signals (with drawing tools + news markers; expandable) ----
-                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,news_marks=d["news_marks"]),
-                                use_container_width=True,config=PLOTLY_DRAW)
-                with st.expander("🔍 Expand chart + drawing tools"):
-                    st.caption("Use the toolbar (top-right of the chart): the line / rectangle / circle / "
-                               "freehand icons draw on the chart; the eraser removes shapes. "
-                               "Diamonds mark news, colored by sentiment.")
-                    st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,big=True,news_marks=d["news_marks"]),
-                                    use_container_width=True,config=PLOTLY_DRAW,key=f"big_{t}")
+                # ---- price + signals (drawing tools always on; news markers; optional Fibonacci) ----
+                st.markdown("##### 📈 Price &amp; signals")
+                st.caption("Drawing tools live in the chart toolbar (top-right): line / path / rectangle / "
+                           "circle, and the eraser. Diamonds mark news, colored by sentiment."
+                           + (" Dotted amber lines are Fibonacci retracement levels." if show_fib else ""))
+                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
+                                    big=True,news_marks=d["news_marks"],fib=show_fib),
+                                use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
 
                 # ---- financial results (revenue & net income) ----
                 fin=get_financials(t)
@@ -911,10 +991,20 @@ if tickers and (run or any(syms)):
                         st.caption("Source: Yahoo. Free depth ≈ last 4 fiscal years and ~4–5 recent quarters "
                                    "(full 5-year quarterly history requires a paid data feed).")
 
-                # ---- backtest: signals vs buy & hold ----
-                st.markdown("##### 📉 Backtest — signals vs buy &amp; hold")
-                bt=backtest(d["o"],d["state_series"],cost=bt_cost)
-                st.plotly_chart(equity_chart(bt,t),use_container_width=True)
+                # ---- backtest: chosen strategy vs buy & hold ----
+                if bt_strategy=="strength":
+                    strat_name=f"Strength ≥{bt_buy} / ≤{bt_sell}"
+                    rule=(f"**Strategy:** hold the stock when its AlphaWire **strength is ≥ {bt_buy}**, "
+                          f"move to **cash when strength ≤ {bt_sell}** (hold position in between).")
+                else:
+                    strat_name="AlphaWire signal"
+                    rule="**Strategy:** hold the stock while the signal is **BUY**, move to **cash on SELL** "
+                    rule+="(**HOLD** keeps the prior position). Signal = the same composite shown above."
+                st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
+                st.caption(rule)
+                pos=strategy_positions(d,bt_strategy,bt_buy,bt_sell)
+                bt=backtest(d["o"],pos,cost=bt_cost)
+                st.plotly_chart(equity_chart(bt,t,label=strat_name),use_container_width=True,key=f"eq_{t}")
                 edge=bt["strat_ret"]-bt["bh_ret"]
                 r1=st.columns(3)
                 r1[0].metric("Strategy return",f"{bt['strat_ret']:+.1f}%",f"{edge:+.1f}% vs buy & hold")
@@ -928,9 +1018,9 @@ if tickers and (run or any(syms)):
                 verdict=("✅ Beat buy & hold over this window." if edge>0 else
                          "➖ Roughly matched buy & hold." if abs(edge)<2 else
                          "❌ Underperformed buy & hold here.")
-                st.caption(f"{verdict}  This is an **in-sample** test on the window above with "
-                           f"{bt_cost*100:.2f}%/switch costs and next-day execution (no look-ahead). "
-                           "Weights aren't optimized; past results don't predict the future.")
+                st.caption(f"{verdict}  **In-sample** test on the window above, "
+                           f"{bt_cost*100:.2f}%/switch cost, next-day execution (no look-ahead). "
+                           "Tune the rule in the sidebar. Past results don't predict the future.")
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)

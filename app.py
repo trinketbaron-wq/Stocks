@@ -31,7 +31,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # THEME
 # ==========================================================================
 BG="#0a0e14"; PANEL="#121a26"; GRID="rgba(255,255,255,0.05)"
-TXT="#e6edf3"; MUTE="#7d8694"
+TXT="#e6edf3"; MUTE="#a7b2c0"
 GREEN="#16c784"; RED="#ea3943"; AMBER="#f5a623"; CYAN="#3ec1d3"
 
 st.set_page_config(page_title="AlphaWire", page_icon="⚡", layout="wide",
@@ -129,6 +129,29 @@ input::placeholder, textarea::placeholder { color:#7d8694 !important; }
   background:rgba(22,199,132,0.18) !important; color:#16c784 !important;
   border-color:#16c784 !important;
 }
+/* ---- universal readable text: labels, captions, body all near-white ---- */
+label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+.stMarkdown, .stMarkdown p, [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p,
+.stRadio label, .stCheckbox label, .stToggle label, [data-baseweb="form-control-label"]{
+  color:#e6edf3 !important;
+}
+small, .stCaption, [data-testid="stCaptionContainer"]{ color:#b8c2cf !important; }
+/* ---- radio: dark, readable; SELECTED option turns green ---- */
+.stRadio [role="radiogroup"] label{ color:#e6edf3 !important; }
+.stRadio [role="radiogroup"] label[data-checked="true"],
+.stRadio [role="radiogroup"] label[aria-checked="true"]{ color:#16c784 !important; font-weight:600 !important; }
+[data-baseweb="radio"] div:first-child{ border-color:#7f8a98 !important; }
+[data-baseweb="radio"][aria-checked="true"] div:first-child,
+[data-baseweb="radio"][data-checked="true"] div:first-child{
+  border-color:#16c784 !important; background:#16c784 !important;
+}
+/* ---- toggle: readable label; track turns green when ON ---- */
+.stToggle label, [data-testid="stToggle"] label{ color:#e6edf3 !important; font-weight:600 !important; }
+[data-baseweb="checkbox"] [role="switch"]{ background:#39424f !important; }
+[data-baseweb="checkbox"] [role="switch"][aria-checked="true"]{ background:#16c784 !important; }
+[data-baseweb="checkbox"][aria-checked="true"] div[role="switch"]{ background:#16c784 !important; }
+/* ---- selectbox / multiselect closed control: dark with light text ---- */
+.stSelectbox div[data-baseweb="select"] *, .stMultiSelect div[data-baseweb="select"] *{ color:#e6edf3 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -342,6 +365,202 @@ def price_move_after(o, when, horizon=3):
     if pos>=len(idx)-1: return None
     end=min(pos+horizon,len(idx)-1)
     return (float(o.Close.iloc[end])/float(o.Close.iloc[pos])-1)*100
+
+# ================= MATERIAL-NEWS ENGINE (multi-year) =================
+# Pull years of company news, keep only MATERIAL catalysts (A-filter), find the stock's biggest
+# price moves (B-spine), then line the two up: when the stock jumped, was there real news?
+
+PERIOD_YEARS={"1mo":0.1,"3mo":0.3,"6mo":0.5,"1y":1,"2y":2,"5y":5,"10y":10,"max":10}
+
+# ordered most-important first; first match wins
+MATERIAL_RULES=[
+ ("Earnings",   ["earnings"," eps ","beats","misses","quarter result","quarterly result","q1 ","q2 ","q3 ","q4 ","results top","reports revenue","profit","loss per share"]),
+ ("Guidance",   ["guidance","outlook","forecast","raises","cuts estimate","warns","lowers","raised its","cut its"]),
+ ("M&A",        ["acqui","merger","to buy","buyout","takeover","to acquire","stake in","combine with","tender offer"]),
+ ("Analyst",    ["upgrade","downgrade","price target","initiates","initiated","overweight","underweight","buy rating","sell rating","outperform","reiterates","raised pt","cut pt"]),
+ ("Regulatory", ["fda","approval","approved","lawsuit","settlement","investigat","antitrust","probe","fine","recall","sec charges","subpoena","ruling"]),
+ ("Capital",    ["buyback","repurchase","dividend","stock split","offering","raises $","convertible","debt offering","secondary"]),
+ ("Product",    ["launch","unveil","announces","partnership","contract","awarded","wins ","secures","deal with","collaborat","new chip","new product"]),
+ ("Management", ["ceo","cfo","resign","steps down","appoints","named ceo","executive","departure","interim"]),
+]
+
+def classify_news(title, summary=""):
+    text=" "+(str(title)+" "+str(summary)).lower()+" "
+    for cat,kws in MATERIAL_RULES:
+        if any(k in text for k in kws): return cat
+    return None
+
+def material_news(items):
+    """Keep only items that match a material category; tag each with its category."""
+    out=[]
+    for it in items or []:
+        cat=classify_news(it.get("title",""), it.get("summary",""))
+        if cat:
+            it=dict(it); it["category"]=cat; out.append(it)
+    return out
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def get_finnhub_news_range(symbol, years=5, per_call_days=365, cap=900):
+    """Paginate Finnhub company-news year-by-year back `years` (free tier serves ~1yr/call)."""
+    key=st.secrets.get("FINNHUB_API_KEY")
+    if not key: return None
+    import requests, datetime as _dt
+    end=_dt.date.today(); start_limit=end-_dt.timedelta(days=int(max(years,0.1)*365))
+    out={}; cur_to=end; calls=0
+    while cur_to>start_limit and calls<12:
+        cur_from=max(start_limit, cur_to-_dt.timedelta(days=per_call_days)); calls+=1
+        try:
+            r=requests.get("https://finnhub.io/api/v1/company-news",
+                params={"symbol":symbol,"from":str(cur_from),"to":str(cur_to),"token":key},timeout=15)
+            raw=r.json()
+        except Exception:
+            raw=[]
+        if isinstance(raw,list):
+            for a in raw:
+                ts=a.get("datetime"); hl=a.get("headline")
+                if not hl or not ts: continue
+                when=_dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                k2=(when,hl[:60])
+                if k2 in out: continue
+                out[k2]={"title":hl,"source":a.get("source","") or "","url":a.get("url","") or "",
+                         "when":when,"dt":ts,"summary":a.get("summary","") or ""}
+        cur_to=cur_from-_dt.timedelta(days=1)
+        if len(out)>=cap: break
+    items=sorted(out.values(),key=lambda x:x["dt"],reverse=True)
+    return items or None
+
+def find_big_moves(o, window=3, top_n=14, min_pct=6.0, sep=8):
+    """B-SPINE: the stock's largest ~window-day moves, de-duplicated, chronological."""
+    idx=_naive_idx(o); c=o["Close"].values; n=len(c)
+    cand=[]
+    for i in range(window,n):
+        prev=c[i-window]
+        if prev>0: cand.append((abs(c[i]/prev-1)*100, i, (c[i]/prev-1)*100))
+    cand.sort(reverse=True)
+    used=[]; chosen=[]
+    for ar,i,r in cand:
+        if ar<min_pct: break
+        if any(abs(i-j)<sep for j in used): continue
+        used.append(i); chosen.append((idx[i],r,i))
+        if len(chosen)>=top_n: break
+    chosen.sort(key=lambda x:x[0])
+    return chosen
+
+def correlate_moves_news(moves, material, window=4):
+    """For each big move, attach the nearest material headline within ±window days (if any)."""
+    md=[]
+    for m in material:
+        if m.get("when"):
+            try: md.append((pd.Timestamp(m["when"]),m))
+            except Exception: pass
+    rows=[]
+    for ts,pct,ipos in moves:
+        near=[(abs((d-ts).days),d,it) for d,it in md if abs((d-ts).days)<=window]
+        near.sort(key=lambda x:x[0])
+        best=near[0][2] if near else None
+        rows.append(dict(date=str(ts)[:10],pct=pct,up=pct>=0,had=bool(near),
+            category=(best.get("category") if best else None),
+            headline=(best.get("title") if best else None),
+            url=(best.get("url") if best else ""),n_near=len(near)))
+    return rows
+
+def news_keyword_stats(o, material, fwd=5):
+    """For each material category, average price move over `fwd` days AFTER the news fired."""
+    from collections import defaultdict
+    agg=defaultdict(list)
+    for it in material:
+        cat=it.get("category")
+        if not cat or not it.get("when"): continue
+        mv=price_move_after(o,it["when"],horizon=fwd)
+        if mv is not None: agg[cat].append(mv)
+    stats=[]
+    for cat,vals in agg.items():
+        if not vals: continue
+        arr=np.array(vals)
+        stats.append(dict(category=cat,n=len(vals),avg=float(arr.mean()),
+            pos=float((arr>0).mean()*100),best=float(arr.max()),worst=float(arr.min())))
+    stats.sort(key=lambda s:abs(s["avg"]),reverse=True)
+    return stats
+
+def big_moves_table_html(rows, fwd_label="move"):
+    import html as _h
+    TD=f"padding:6px 9px;border-bottom:1px solid {GRID};vertical-align:top"
+    TH=f"padding:7px 9px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid {GRID}"
+    body=[]
+    for r in rows[::-1]:   # most recent first
+        mc=GREEN if r["up"] else RED; arrow="▲" if r["up"] else "▼"
+        if r["headline"]:
+            cat=f"<span style='color:{CYAN};font-size:10px'>{r['category']}</span>"
+            hl=_h.escape(r["headline"][:120])
+            link=f"<a href='{r['url']}' target='_blank' style='color:{TXT};text-decoration:none'>{hl}</a>" if r["url"] else hl
+            news=f"{cat}<br>{link}"+(f"<span style='color:{MUTE};font-size:10px'> · +{r['n_near']-1} more</span>" if r["n_near"]>1 else "")
+        else:
+            news=f"<span style='color:{MUTE}'>— no material news within ±4 days —</span>"
+        body.append(f"<tr><td style='{TD};color:{MUTE};white-space:nowrap'>{r['date']}</td>"
+                    f"<td style='{TD};color:{mc};font-weight:700;text-align:right;white-space:nowrap'>{arrow} {r['pct']:+.1f}%</td>"
+                    f"<td style='{TD}'>{news}</td></tr>")
+    head=(f"<tr><th style='{TH}'>Date</th><th style='{TH};text-align:right'>Big {fwd_label}</th>"
+          f"<th style='{TH}'>Material news at that time</th></tr>")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"Chakra Petch\",sans-serif;font-size:12px'>{head}{''.join(body)}</table></div>")
+
+def keyword_stats_html(stats, fwd=5):
+    TD=f"padding:6px 9px;border-bottom:1px solid {GRID};text-align:right"
+    TH=f"padding:7px 9px;color:{MUTE};font-size:10px;text-align:right;border-bottom:1px solid {GRID}"
+    body=[]
+    for s in stats:
+        ac=GREEN if s["avg"]>=0 else RED
+        body.append(f"<tr><td style='{TD};text-align:left;color:{TXT}'>{s['category']}</td>"
+                    f"<td style='{TD};color:{MUTE}'>{s['n']}</td>"
+                    f"<td style='{TD};color:{ac};font-weight:700'>{s['avg']:+.1f}%</td>"
+                    f"<td style='{TD};color:{MUTE}'>{s['pos']:.0f}%</td>"
+                    f"<td style='{TD};color:{GREEN}'>{s['best']:+.0f}%</td>"
+                    f"<td style='{TD};color:{RED}'>{s['worst']:+.0f}%</td></tr>")
+    head=(f"<tr><th style='{TH};text-align:left'>Catalyst type</th><th style='{TH}'>Events</th>"
+          f"<th style='{TH}'>Avg {fwd}d move after</th><th style='{TH}'>% up</th>"
+          f"<th style='{TH}'>Best</th><th style='{TH}'>Worst</th></tr>")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(body)}</table></div>")
+
+# ================= AWN — AlphaWire News indicator =================
+# A NEWS-DRIVEN signal (like RSI/MACD, but built from catalysts). For each material event it
+# fires an impulse = the CAUSAL historical average move that this stock made after PRIOR, already-
+# resolved events of the same catalyst type (no look-ahead). Impulses then decay continuously
+# (option B) with a tunable half-life, so a fresh beat reads stronger than a stale one.
+def awn_series(o, material, half_life=5, fwd=5, scale=8.0):
+    idx=_naive_idx(o); n=len(o); c=o["Close"].values
+    evs=[]
+    for it in material or []:
+        if not it.get("when"): continue
+        pos=int(idx.searchsorted(pd.Timestamp(it["when"])))
+        if pos>=n: pos=n-1
+        evs.append((pos,it.get("category"),it.get("title","")))
+    evs.sort()
+    def fwd_move(p):
+        e=min(p+fwd,n-1)
+        return (c[e]/c[p]-1)*100 if (c[p]>0 and e>p) else 0.0
+    from collections import defaultdict
+    hist=defaultdict(list)             # category -> list of (resolve_index, realized move)
+    impulse=np.zeros(n)
+    for p,cat,title in evs:
+        prior=[m for (ri,m) in hist[cat] if ri<=p]      # only events whose fwd window CLOSED by p
+        imp=float(np.mean(prior)) if prior else 0.3*vader(title)   # fallback before a track record
+        impulse[p]+=imp
+        hist[cat].append((p+fwd,fwd_move(p)))
+    decay=0.5**(1.0/max(half_life,1)); acc=0.0; awn=np.zeros(n)
+    for i in range(n):
+        acc=acc*decay+impulse[i]; awn[i]=acc
+    awn=pd.Series(awn,index=o.index)
+    awn_long=(awn>0).astype(float)
+    awn_score=pd.Series(100*np.tanh(awn/scale),index=o.index)
+    return awn, awn_long, awn_score
+
+def awn_latest(material):
+    """Most recent material catalyst (for the card readout)."""
+    md=[m for m in (material or []) if m.get("dt")]
+    return max(md,key=lambda m:m["dt"]) if md else None
 
 def news_table_html(items, scores, moves):
     import html as _h
@@ -923,23 +1142,35 @@ def _hyst(x, buy, sell):
 
 def primitive_catalog():
     """Return list of primitive-ids. A pid is a tuple; _prim_series rebuilds its 1-0 series."""
-    pids=[("ema_cross",),("px_ema50",),("macd",),("di",),("obv",),("px_bbmid",),
-          ("adx_di",20),("adx_di",25)]
-    for b,s in [(30,70),(25,75),(35,65),(40,60)]: pids.append(("rsi",b,s))
-    for b,s in [(20,80),(30,70)]: pids.append(("stoch",b,s))
-    for b,s in [(20,80),(30,70)]: pids.append(("mfi",b,s))
-    for b,s in [(0.2,0.8),(0.1,0.9)]: pids.append(("pctb",b,s))
+    pids=[("ema_cross",),("px_ema50",),("px_ema200",),("stacked",),("ema50_slope",),
+          ("macd",),("macd_hist_up",),("di",),("stoch_cross",),
+          ("obv",),("obv_slope",),("px_bbmid",),("bb_break",),("rsi_mid",),
+          ("adx_di",20),("adx_di",25),("adx_rising",)]
+    for b,s in [(30,70),(25,75),(35,65),(40,60),(20,80),(45,55)]: pids.append(("rsi",b,s))
+    for b,s in [(20,80),(30,70),(10,90)]: pids.append(("stoch",b,s))
+    for b,s in [(20,80),(30,70),(25,75)]: pids.append(("mfi",b,s))
+    for b,s in [(0.2,0.8),(0.1,0.9),(0.05,0.95)]: pids.append(("pctb",b,s))
     return pids
 
-def _prim_series(o, pid):
+def _prim_series(o, pid, awn=None):
     k=pid[0]
+    if k=="awn":       return awn if awn is not None else pd.Series(0.0,index=o.index)
     if k=="ema_cross": return (o["EMA50"]>=o["EMA200"]).astype(float)
     if k=="px_ema50":  return (o["Close"]>=o["EMA50"]).astype(float)
+    if k=="px_ema200": return (o["Close"]>=o["EMA200"]).astype(float)
+    if k=="stacked":   return ((o["Close"]>=o["EMA50"])&(o["EMA50"]>=o["EMA200"])).astype(float)
+    if k=="ema50_slope": return (o["EMA50"]>=o["EMA50"].shift(5)).astype(float)
     if k=="macd":      return (o["MACD"]>=o["MACD_signal"]).astype(float)
+    if k=="macd_hist_up": return (o["MACD_hist"]>=o["MACD_hist"].shift(3)).astype(float)
     if k=="di":        return (o["plus_DI"]>=o["minus_DI"]).astype(float)
+    if k=="stoch_cross": return (o["Stoch_K"]>=o["Stoch_D"]).astype(float)
     if k=="obv":       return (o["OBV"]>=o["OBV"].rolling(20).mean()).astype(float)
+    if k=="obv_slope": return (o["OBV"]>=o["OBV"].shift(10)).astype(float)
     if k=="px_bbmid":  return (o["Close"]>=o["BB_mid"]).astype(float)
+    if k=="bb_break":  return (o["Close"]>=o["BB_up"]).astype(float)
+    if k=="rsi_mid":   return (o["RSI"]>=50).astype(float)
     if k=="adx_di":    return (((o["ADX"]>=pid[1])&(o["plus_DI"]>=o["minus_DI"]))).astype(float)
+    if k=="adx_rising":return (((o["ADX"]>=o["ADX"].shift(5))&(o["ADX"]>=20))).astype(float)
     if k=="rsi":       return _hyst(o["RSI"],pid[1],pid[2])
     if k=="stoch":     return _hyst(o["Stoch_K"],pid[1],pid[2])
     if k=="mfi":       return _hyst(o["MFI"],pid[1],pid[2])
@@ -948,17 +1179,20 @@ def _prim_series(o, pid):
 
 def _prim_label(pid):
     k=pid[0]
-    return {"ema_cross":"EMA50≥200","px_ema50":"Px≥EMA50","macd":"MACD≥sig","di":"+DI≥−DI",
-            "obv":"OBV↑","px_bbmid":"Px≥BBmid"}.get(k) or (
+    if k=="awn": return "AWN>0"
+    return {"ema_cross":"EMA50≥200","px_ema50":"Px≥EMA50","px_ema200":"Px≥EMA200","stacked":"Px≥EMA50≥200",
+            "ema50_slope":"EMA50↑","macd":"MACD≥sig","macd_hist_up":"MACDhist↑","di":"+DI≥−DI",
+            "stoch_cross":"StochK≥D","obv":"OBV>avg","obv_slope":"OBV↑","px_bbmid":"Px≥BBmid",
+            "bb_break":"Px≥BBup","rsi_mid":"RSI≥50","adx_rising":"ADX↑"}.get(k) or (
             f"ADX≥{pid[1]}&+DI" if k=="adx_di" else
             f"RSI {pid[1]}/{pid[2]}" if k=="rsi" else
             f"Stoch {pid[1]}/{pid[2]}" if k=="stoch" else
             f"MFI {pid[1]}/{pid[2]}" if k=="mfi" else
             f"%B {pid[1]}/{pid[2]}" if k=="pctb" else str(pid))
 
-def combo_series(o, spec):
+def combo_series(o, spec, awn=None):
     """spec = {'op':'SINGLE'|'AND'|'OR','parts':[pid,...]} -> long/flat 1-0 series."""
-    parts=[_prim_series(o,p) for p in spec["parts"]]
+    parts=[_prim_series(o,p,awn) for p in spec["parts"]]
     if not parts: return pd.Series(0.0,index=o.index)
     if spec["op"]=="OR":
         s=parts[0]
@@ -972,15 +1206,17 @@ def combo_label(spec):
     j={"AND":" & ","OR":" | ","SINGLE":""}.get(spec["op"]," & ")
     return j.join(_prim_label(p) for p in spec["parts"])
 
-def optimize_combo_for_ticker(d, split_frac=0.7, cost=0.001, top_k=8, triples=True):
+def optimize_combo_for_ticker(d, split_frac=0.7, cost=0.001, top_k=10, triples=True, awn=None):
     """Search singles + AND/OR pairs (+ 3-way ANDs of the top primitives). Pick the best by
     TRAIN return; report each candidate's TEST return. Returns ranked rows + the best spec."""
     o=d["o"]; n=len(o); k=_split_idx(n,split_frac)
     tr_o, te_o = o.iloc[:k], o.iloc[k:]
     cat=primitive_catalog()
+    if awn is not None and float(awn.iloc[:k].std() or 0)>0:   # only search AWN if it actually varies
+        cat=cat+[("awn",)]
     cache={}
     def full(pid):
-        if pid not in cache: cache[pid]=_prim_series(o,pid)
+        if pid not in cache: cache[pid]=_prim_series(o,pid,awn)
         return cache[pid]
     def evl(series):                              # train return for a full-length 1-0 series
         return backtest(tr_o, series.iloc[:k], cost=cost)["strat_ret"]
@@ -999,15 +1235,15 @@ def optimize_combo_for_ticker(d, split_frac=0.7, cost=0.001, top_k=8, triples=Tr
             sor=((full(a)+full(b))>0).astype(float); cand.append((evl(sor),{"op":"OR","parts":[a,b]}))
     # 3) 3-way ANDs among the very top
     if triples:
-        for i in range(min(4,len(topp))):
-            for j in range(i+1,min(4,len(topp))):
-                for m in range(j+1,min(4,len(topp))):
+        for i in range(min(5,len(topp))):
+            for j in range(i+1,min(5,len(topp))):
+                for m in range(j+1,min(5,len(topp))):
                     a,b,c=topp[i],topp[j],topp[m]
                     s3=full(a)*full(b)*full(c); cand.append((evl(s3),{"op":"AND","parts":[a,b,c]}))
     # build rows with train + test
     rows=[]
     for tr_ret,spec in cand:
-        ser=combo_series(o,spec)
+        ser=combo_series(o,spec,awn)
         bt_tr=backtest(tr_o,ser.iloc[:k],cost=cost); bt_te=backtest(te_o,ser.iloc[k:],cost=cost)
         rows.append(dict(spec=spec,label=combo_label(spec),
             train_ret=bt_tr["strat_ret"],test_ret=bt_te["strat_ret"],
@@ -1221,8 +1457,90 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
+
+# ================= ACCOUNTS (lightweight) =================
+# Username + salted-hash password, stored in a JSON file. NOTE: on Streamlit Community Cloud the
+# container filesystem is EPHEMERAL — this resets on reboot/redeploy. For permanent multi-user
+# accounts, point ALPHAWIRE_DB at a persistent disk or swap _load_db/_save_db for a real database.
+import json as _json, hashlib as _hl, os as _os
+_USER_DB=_os.environ.get("ALPHAWIRE_DB","alphawire_users.json")
+
+def _load_db():
+    try:
+        with open(_USER_DB,"r") as f: return _json.load(f)
+    except Exception: return {}
+
+def _save_db(db):
+    try:
+        with open(_USER_DB,"w") as f: _json.dump(db,f)
+        return True
+    except Exception: return False
+
+def _pw_hash(pw,salt): return _hl.sha256((salt+":"+pw).encode("utf-8")).hexdigest()
+
+def register_user(username,pw):
+    username=(username or "").strip().lower()
+    if len(username)<3: return False,"Username needs ≥3 characters."
+    if len(pw or "")<6: return False,"Password needs ≥6 characters."
+    db=_load_db()
+    if username in db: return False,"That username is taken."
+    salt=_hl.sha256(_os.urandom(16)).hexdigest()[:16]
+    db[username]={"salt":salt,"pw":_pw_hash(pw,salt),"data":{"watchlist":[],"bespoke":{}}}
+    return (True,"Account created.") if _save_db(db) else (False,"Could not write to storage.")
+
+def verify_user(username,pw):
+    username=(username or "").strip().lower()
+    db=_load_db(); u=db.get(username)
+    if not u: return False
+    return u.get("pw")==_pw_hash(pw,u.get("salt",""))
+
+def get_user_data(username):
+    return _load_db().get((username or "").strip().lower(),{}).get("data",{"watchlist":[],"bespoke":{}})
+
+def save_user_data(username,data):
+    username=(username or "").strip().lower(); db=_load_db()
+    if username not in db: return False
+    db[username]["data"]=data; return _save_db(db)
+
 with st.sidebar:
     st.header("⚙ Settings")
+
+    # ---- account: log in to save your watchlist + bespoke combinations ----
+    _user=st.session_state.get("user")
+    if _user:
+        st.success(f"👤 Signed in: **{_user}**")
+        if st.button("💾 Save watchlist + bespoke rules",use_container_width=True):
+            wl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]
+            wl=[s for s in wl if s]
+            bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items()
+                 if k.startswith("bespoke_choice_")}
+            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp})
+            st.toast("Saved." if ok else "Save failed (storage).",icon="💾" if ok else "⚠️")
+        if st.button("Log out",use_container_width=True):
+            st.session_state.pop("user",None); st.rerun()
+    else:
+        with st.expander("👤 Log in / Register — save your setup"):
+            _au=st.text_input("Username",key="auth_u")
+            _ap=st.text_input("Password",type="password",key="auth_p")
+            _ac=st.columns(2)
+            if _ac[0].button("Log in",use_container_width=True,key="auth_login"):
+                if verify_user(_au,_ap):
+                    u=_au.strip().lower(); st.session_state["user"]=u
+                    dat=get_user_data(u)
+                    if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
+                    for tkr,choice in (dat.get("bespoke") or {}).items():
+                        st.session_state[f"bespoke_choice_{tkr}"]=choice
+                        st.session_state[f"besptog_{tkr}"]=True
+                    st.rerun()
+                else:
+                    st.error("Wrong username or password.")
+            if _ac[1].button("Register",use_container_width=True,key="auth_reg"):
+                ok,msg=register_user(_au,_ap)
+                (st.success if ok else st.error)(msg)
+                if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
+        st.caption("Optional. Accounts persist while the app stays awake; on the free tier they reset when the "
+                   "app reboots (no permanent database attached).")
+    st.divider()
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 
@@ -1231,6 +1549,9 @@ with st.sidebar:
         help="Percent of history (NOT days) used to TUNE each combination. The remaining % is held out as the "
              "out-of-sample test. 70 = tune on the older 70%, test on the most recent 30%.")
     st.caption(f"Tuning on the oldest **{split_default}%**, testing on the newest **{100-split_default}%** (unseen).")
+    awn_halflife=st.slider("AWN news half-life (days)",2,20,5,1,
+        help="How fast the AlphaWire News signal decays after a catalyst. 5 = a catalyst's effect roughly halves "
+             "every 5 trading days. Lower = news matters only briefly; higher = it lingers.")
 
     st.markdown("**Backtest strategy** (manual)")
     _keys=list(BT_STRATEGIES.keys())
@@ -1306,7 +1627,6 @@ if tickers and (run or any(syms)):
         titles=[n["title"] for n in news_items if n["title"]]
         scores=(llm_sentiment(titles,api_key) if (use_ai and api_key) else [vader(x) for x in titles]) if titles else []
         moves=[price_move_after(o,n["when"]) for n in news_items]
-        news_marks=[(n["when"],sc,n["title"]) for n,sc in zip(news_items,scores) if n["when"]]
         news_avg=float(np.mean(scores)) if scores else 0.0
         # news is a weighted vote folded into the LIVE score only (no daily history)
         news_vote=1 if news_avg>0.1 else -1 if news_avg<-0.1 else 0
@@ -1315,11 +1635,26 @@ if tickers and (run or any(syms)):
         lr=live_comp/live_max
         live_state="BUY" if lr>=BUY_TH else "SELL" if lr<=-BUY_TH else "HOLD"
         live_strength=round((lr+1)/2*100)
+        # ---- MULTI-YEAR MATERIAL NEWS: catalysts over years, correlated with the biggest price moves ----
+        yrs=PERIOD_YEARS.get(period,2)
+        hist_raw=get_finnhub_news_range(t,years=yrs) if news_src=="Finnhub" else None
+        mat=material_news(hist_raw) if hist_raw else material_news(news_items)
+        big_moves=find_big_moves(o,window=3,top_n=14,min_pct=6.0,sep=8)
+        move_rows=correlate_moves_news(big_moves,mat,window=4)
+        kw_stats=news_keyword_stats(o,mat,fwd=5)
+        # AWN — AlphaWire News indicator (decaying, causal catalyst signal)
+        awn_raw,awn_long,awn_score=awn_series(o,mat,half_life=awn_halflife,fwd=5)
+        awn_now=float(awn_score.iloc[-1]); awn_last=awn_latest(mat)
+        # chart markers = MATERIAL catalysts only (not the recent noise headlines)
+        mat_marks=[(m["when"],vader(m["title"]),f"[{m['category']}] {m['title']}") for m in mat if m.get("when")]
+        news_marks=mat_marks if mat_marks else [(n["when"],sc,n["title"]) for n,sc in zip(news_items,scores) if n["when"]]
         data[t]=dict(o=o,votes=votes,strength=live_strength,state=live_state,
             strength_series=strength, state_series=state, vix_now=vix_now,
             vix_series=vix_series, spy_series=spy_series, news=news_items, news_src=news_src,
             news_avg=news_avg, news_vote=news_vote, scores=scores, titles=titles,
-            moves=moves, news_marks=news_marks, funda=funda)
+            moves=moves, news_marks=news_marks, funda=funda,
+            material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs,
+            awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last)
         prog.progress((k+1)/len(tickers))
     prog.empty()
 
@@ -1346,7 +1681,7 @@ if tickers and (run or any(syms)):
                         st.session_state[f"bespoke_choice_{t}"]=choice
                     st.session_state[f"bespoke_{t}"]=choice               # drives chart + backtest downstream
                     rr=next((r for r in ores["rows"] if r["label"]==choice["label"]),ores["best"])
-                    posnow=combo_series(d["o"],rr["spec"]).iloc[-1]
+                    posnow=combo_series(d["o"],rr["spec"],awn=d.get("awn")).iloc[-1]
                     bespoke_disp=dict(long=float(posnow)>0.5,rule=rr["label"],
                                       in_ret=rr["train_ret"],in_bh=rr["bh_train"],in_beat=rr["train_beat"],
                                       oos=rr["test_ret"],bh=rr["bh_test"],beat=rr["test_beat"])
@@ -1355,6 +1690,19 @@ if tickers and (run or any(syms)):
                 # --- card first ---
                 st.markdown(score_card(t,d["strength"],d["state"],d["funda"],bespoke=bespoke_disp),
                             unsafe_allow_html=True)
+                # --- AWN: AlphaWire News indicator chip ---
+                awnv=d.get("awn_score",0.0); awc=GREEN if awnv>3 else RED if awnv<-3 else MUTE
+                last=d.get("awn_last")
+                if last and last.get("when"):
+                    try: _days=(pd.Timestamp(d["o"].index[-1]).tz_localize(None)-pd.Timestamp(last["when"])).days
+                    except Exception: _days=None
+                    ago=f"{_days}d ago" if _days is not None and _days>=0 else "recent"
+                    cat=last.get("category","news"); tail=f"{cat} · {ago}"
+                else:
+                    tail="no material catalysts in window"
+                st.markdown(f"<div style='border:1px solid {awc}55;border-radius:8px;padding:5px 9px;margin:2px 0 6px;"
+                            f"background:{awc}14;font-size:12px'><b style='color:{awc}'>AWN {awnv:+.0f}</b> "
+                            f"<span style='color:{MUTE}'>· AlphaWire News · {tail}</span></div>",unsafe_allow_html=True)
                 bdlbl=(f"🔢 Composite score {int(d['strength'])}/100" if bespoke_disp
                        else f"🔢 How {int(d['strength'])}/100 is built")
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
@@ -1369,7 +1717,7 @@ if tickers and (run or any(syms)):
                                  help="Search indicator combinations on this stock & out-of-sample-test them, enabling a bespoke signal."):
                         with st.spinner(f"Searching {t} indicator combinations…"):
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
-                                d,split_frac=split_default/100,cost=bt_cost)
+                                d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                         st.rerun()
                 else:
@@ -1379,7 +1727,7 @@ if tickers and (run or any(syms)):
                         try: get_hist.clear()
                         except Exception: pass
                         st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
-                            d,split_frac=split_default/100,cost=bt_cost)
+                            d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                         st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                         st.session_state.pop(f"bespoke_choice_{t}",None)
                         st.rerun()
@@ -1411,7 +1759,7 @@ if tickers and (run or any(syms)):
                     rule=(f"<span style='color:{AMBER}'>**Bespoke combination locked for {t}**</span> "
                           f"(the indicator mix that best fit its history) — overriding the sidebar. "
                           f"**Long when:** {_bsp['label']}.")
-                    pos=combo_series(d["o"],_bsp["spec"])
+                    pos=combo_series(d["o"],_bsp["spec"],awn=d.get("awn"))
                 else:
                     _strat,_buy,_sell=bt_strategy,bt_buy,bt_sell
                     if _strat=="strength":
@@ -1505,7 +1853,7 @@ if tickers and (run or any(syms)):
                     if st.button(f"⚡ Search {t} combinations",key=f"optrun_{t}",use_container_width=True):
                         with st.spinner(f"Searching {t} indicator combinations on the train split…"):
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
-                                d,split_frac=split_pct/100,cost=bt_cost)
+                                d,split_frac=split_pct/100,cost=bt_cost,awn=d.get("awn"))
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                             st.session_state.pop(f"bespoke_choice_{t}",None)
                     ores=st.session_state.get(f"optres_{t}")
@@ -1571,6 +1919,25 @@ if tickers and (run or any(syms)):
                                 + f"\n\n*(Reinvesting every time. The single biggest winner in all {ts['n']} trades "
                                   f"was **{biggest:+.1f}%** — there is no 20%+ trade.)* "
                                   "If any price here doesn't match the chart, that's the bug — tell me which line.")
+
+                # ---- MATERIAL catalysts vs the biggest moves (multi-year) ----
+                mrows=d.get("move_rows") or []
+                if mrows:
+                    nmat=len(d.get("material") or []); hitn=sum(1 for r in mrows if r["had"])
+                    with st.expander(f"📰 Material catalysts vs {t}'s biggest moves — last {d.get('news_years','?')}y "
+                                     f"({nmat} catalysts, {hitn}/{len(mrows)} big moves had news)",expanded=False):
+                        st.caption("The stock's largest ~3-day moves, each lined up against **material** news "
+                                   "(earnings, guidance, M&A, analyst, regulatory, etc.) within ±4 days — the noise "
+                                   "headlines are filtered out. Some moves had a clear catalyst; some didn't.")
+                        st.markdown(big_moves_table_html(mrows),unsafe_allow_html=True)
+                        if d.get("kw_stats"):
+                            st.markdown("**Which catalysts moved the stock** — average 5-day move after each type fired:")
+                            st.markdown(keyword_stats_html(d["kw_stats"],fwd=5),unsafe_allow_html=True)
+                            st.caption("Correlation, not causation — a small sample of past events. A catalyst that "
+                                       "averaged positive historically can still disappoint next time.")
+                        if d["news_src"]!="Finnhub":
+                            st.caption("⚠️ Using Yahoo's shallow recent feed. Add **FINNHUB_API_KEY** in Secrets for "
+                                       "multi-year history — that's what makes this table reach back across the chart.")
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)

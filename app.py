@@ -1,6 +1,7 @@
 """
-SIGNAL DECK — interactive multi-stock screener (Streamlit)
-==========================================================
+ALPHAWIRE — interactive multi-stock screener (Streamlit)
+========================================================
+© 2026 7562609 Manitoba Inc. All rights reserved.
 Up to 5 tickers -> one composite STRENGTH score each (0-100) that maps to a
 BUY / HOLD / SELL verdict (green / amber / red). Every indicator casts points
 into that score, including the VIX. A dense color-coded matrix compares all
@@ -33,7 +34,7 @@ BG="#0a0e14"; PANEL="#121a26"; GRID="rgba(255,255,255,0.05)"
 TXT="#e6edf3"; MUTE="#7d8694"
 GREEN="#16c784"; RED="#ea3943"; AMBER="#f5a623"; CYAN="#3ec1d3"
 
-st.set_page_config(page_title="Signal Deck", page_icon="📡", layout="wide",
+st.set_page_config(page_title="AlphaWire", page_icon="⚡", layout="wide",
                    initial_sidebar_state="collapsed")
 
 st.markdown(f"""
@@ -340,9 +341,45 @@ def price_signals(o, comp_series, tkr):
 # ==========================================================================
 # UI
 # ==========================================================================
-st.markdown("""<div class="hero"><h1><span class="blip"></span>SIGNAL DECK</h1>
-<p>Composite buy/sell strength across up to five tickers · indicators + VIX vote into one score ·
-tap any row to expand · historical signals marked on each chart.</p></div>""",unsafe_allow_html=True)
+st.markdown("""
+<div class="hero">
+<svg viewBox="0 0 460 124" style="width:100%;max-width:520px;height:auto;display:block" role="img" aria-label="AlphaWire">
+  <defs>
+    <linearGradient id="awg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#16c784"/>
+      <stop offset="0.55" stop-color="#3ec1d3"/>
+      <stop offset="1" stop-color="#f5a623"/>
+    </linearGradient>
+    <filter id="awglow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <line x1="20" y1="112" x2="440" y2="112" stroke="rgba(62,193,211,0.22)" stroke-width="1.4"/>
+  <line x1="20" y1="112" x2="440" y2="112" stroke="url(#awg)" stroke-width="1.4"
+        stroke-dasharray="6 10" class="aw-dash"/>
+  <circle r="3.4" fill="#16c784" filter="url(#awglow)" cy="112">
+    <animate attributeName="cx" values="20;440" dur="3.2s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="3.2s" repeatCount="indefinite"/>
+  </circle>
+  <g filter="url(#awglow)">
+    <circle cx="54" cy="50" r="32" fill="#0d1622" stroke="url(#awg)" stroke-width="2.4"/>
+  </g>
+  <path d="M86 50 H112" stroke="url(#awg)" stroke-width="2" fill="none"/>
+  <circle cx="112" cy="50" r="3" fill="#3ec1d3"/>
+  <text x="54" y="51" font-family="'Chakra Petch',sans-serif" font-weight="700" font-size="40"
+        fill="url(#awg)" text-anchor="middle" dominant-baseline="central">&#945;</text>
+  <text x="128" y="52" font-family="'Chakra Petch',sans-serif" font-weight="700" font-size="44"
+        fill="url(#awg)" dominant-baseline="middle">AlphaWire</text>
+  <text x="130" y="86" font-family="'IBM Plex Mono',monospace" font-weight="500" font-size="12"
+        fill="#7d8694" letter-spacing="1.6">COMPOSITE BUY / SELL SIGNAL ENGINE</text>
+</svg>
+</div>
+<style>
+.aw-dash{animation:awflow 1.1s linear infinite}
+@keyframes awflow{to{stroke-dashoffset:-16}}
+</style>
+""", unsafe_allow_html=True)
 
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
 with st.sidebar:
@@ -357,7 +394,7 @@ cols=st.columns(5)
 defaults=["AAPL","MSFT","NVDA","",""]
 syms=[cols[i].text_input(f"#{i+1}",value=defaults[i],key=f"sym{i}",label_visibility="collapsed",
       placeholder=f"#{i+1}") for i in range(5)]
-run=st.button("⚡ Run Signal Deck",type="primary",use_container_width=True)
+run=st.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
 
 tickers=[]
 for s in syms:
@@ -446,8 +483,13 @@ if tickers and (run or any(syms)):
                     st.caption("No recent headlines for this ticker.")
 
         st.markdown("<hr>",unsafe_allow_html=True)
-        st.caption("Scores describe current & past conditions — not predictions. "
-                   "Historical ▲/▼ use technical indicators + VIX (news has no daily history "
-                   "and only affects the live verdict). Not financial advice.")
+        st.markdown(f"""<div style="color:{MUTE};font-size:11px;line-height:1.6">
+        Scores describe current &amp; past conditions — not predictions. Historical ▲/▼ use
+        technical indicators + VIX (news has no daily history and only affects the live verdict).
+        Not financial advice.
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);
+        font-family:'Chakra Petch',sans-serif;letter-spacing:.04em;color:{MUTE}">
+        <span style="color:{GREEN}">▲</span> ALPHAWIRE &nbsp;·&nbsp; © 2026 7562609 Manitoba Inc. &nbsp;·&nbsp; All rights reserved.
+        </div></div>""",unsafe_allow_html=True)
 elif not tickers:
-    st.info("Enter at least one ticker above, then hit **Run Signal Deck**.")
+    st.info("Enter at least one ticker above, then hit **Run AlphaWire**.")

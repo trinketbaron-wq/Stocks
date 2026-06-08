@@ -2,7 +2,7 @@
 ALPHAWIRE — interactive multi-stock screener (Streamlit)
 ========================================================
 © 2026 7562609 Manitoba Inc. All rights reserved.
-Up to 5 tickers -> one composite STRENGTH score each (0-100) that maps to a
+Up to 5 tickers -> one composite AlphaRank score each (0-100) that maps to a
 BUY / HOLD / SELL verdict (green / amber / red). Every indicator casts points
 into that score, including the VIX. A dense color-coded matrix compares all
 tickers; tap any indicator row to blow up a detail chart. Each stock also gets
@@ -863,7 +863,7 @@ def score_card(tkr,strength,state,funda,bespoke=None):
       <div class="lab">α Alphawire · {bespoke['rule']} · historical return</div>
       <div class="num" style="color:{incol}">{bespoke['in_ret']:+.0f}%<span style="font-size:14px;color:{MUTE}"> vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
       <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
-      <div class="cardsub" style="margin-top:5px"><span style="color:{col};font-weight:700;font-size:14px">{state} · {int(strength)}/100</span><span style="color:{MUTE};font-size:11px"> composite score</span></div>
+      <div class="cardsub" style="margin-top:5px"><span style="color:{col};font-weight:700;font-size:14px">{state} · {int(strength)}/100</span><span style="color:{MUTE};font-size:11px"> AlphaRank</span></div>
       <div class="gauge"><span class="tick" style="left:calc({strength}% - 1.5px)"></span></div>
       <div class="cardsub">{sub}</div>
     </div>"""
@@ -871,13 +871,13 @@ def score_card(tkr,strength,state,funda,bespoke=None):
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
-      <div class="lab">strength</div>
+      <div class="lab">AlphaRank</div>
       <div class="num" style="color:{col}">{int(strength)}<span style="font-size:16px;color:{MUTE}">/100</span></div>
       <div class="gauge"><span class="tick" style="left:calc({strength}% - 1.5px)"></span></div>
       <div class="cardsub">{sub}</div>
     </div>"""
 
-INDICATORS=["VERDICT","STRENGTH","TREND","EMA 50/200","RSI","MACD","STOCH %K",
+INDICATORS=["VERDICT","ALPHARANK","TREND","EMA 50/200","RSI","MACD","STOCH %K",
             "BOLLINGER","MFI","REL STR","OBV","ADX","ATR %","VIX","NEWS"]
 
 def matrix(data):
@@ -889,7 +889,7 @@ def matrix(data):
         def cell(val,s): return val,(GREEN if s>0 else RED if s<0 else MUTE)
         rows={}
         rows["VERDICT"]=(stt,verdict_color(stt))
-        rows["STRENGTH"]=(f"{int(stg)}", GREEN if stg>=60 else RED if stg<=40 else AMBER)
+        rows["ALPHARANK"]=(f"{int(stg)}", GREEN if stg>=60 else RED if stg<=40 else AMBER)
         tr=v["trend50"]+v["trend200"]
         rows["TREND"]=("▲ up" if tr>0 else "▼ down" if tr<0 else "~ mixed",
                        GREEN if tr>0 else RED if tr<0 else MUTE)
@@ -918,7 +918,7 @@ def style_matrix(dd,cc):
     for r in dd.index:
         for c in dd.columns:
             col=cc.loc[r,c]
-            strong = r in ("VERDICT","STRENGTH")
+            strong = r in ("VERDICT","ALPHARANK")
             css.loc[r,c]=(f"background-color:{col}{'33' if strong else '1f'};"
                           f"color:{col};font-weight:{700 if strong else 500};"
                           f"text-align:center;border:1px solid {col}44")
@@ -939,7 +939,7 @@ def matrix_html(dd, cc):
         for c in dd.columns:
             col=cc.loc[r,c]; val=dd.loc[r,c]
             if val is None or (isinstance(val,float) and pd.isna(val)): val=""
-            strong = r in ("VERDICT","STRENGTH")
+            strong = r in ("VERDICT","ALPHARANK")
             body+=(f"<td style='background:{col}{'33' if strong else '1f'};color:{col};text-align:center;"
                    f"padding:7px 11px;font-weight:{700 if strong else 500};font-size:12.5px;"
                    f"border:1px solid {col}44'>{val}</td>")
@@ -956,13 +956,13 @@ def overlay_indicator(name, data):
             s=fn(d["o"]).tail(180)
             fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6)))
     title=name
-    if name in ("VERDICT","STRENGTH"):
+    if name in ("VERDICT","ALPHARANK"):
         for t,d in data.items():
             s=d["strength_series"].tail(180)
             fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.8)))
         fig.add_hrect(y0=60,y1=100,fillcolor=GREEN,opacity=0.06,line_width=0)
         fig.add_hrect(y0=0,y1=40,fillcolor=RED,opacity=0.06,line_width=0)
-        title="STRENGTH over time (0-100)"
+        title="AlphaRank over time (0–100)"
     elif name=="RSI":
         add("RSI",lambda o:o.RSI); fig.add_hline(y=70,line=dict(dash="dash",width=.6,color=RED)); fig.add_hline(y=30,line=dict(dash="dash",width=.6,color=GREEN)); title="RSI"
     elif name=="MACD": add("MACD",lambda o:o.MACD); title="MACD line"
@@ -1011,7 +1011,7 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
     bi=[i for i in buys if idx[i] in d.index]
     si=[i for i in sells if idx[i] in d.index]
     fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.07,row_heights=[0.7,0.3],
-                      subplot_titles=("","strength (0-100)"))
+                      subplot_titles=("","AlphaRank (0–100)"))
     if style=="line":
         fig.add_trace(go.Scatter(x=d.index,y=d.Close,name="price",mode="lines",
             line=dict(width=1.8,color=TXT)),row=1,col=1)
@@ -1063,7 +1063,7 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
                 marker=dict(symbol="diamond",size=8,color=col,line=dict(width=0.5,color="#000")),
                 text=txt,hovertemplate="📰 %{text}<extra></extra>"),row=1,col=1)
     s4=strength_series.reindex(d.index)
-    fig.add_trace(go.Scatter(x=s4.index,y=s4,name="strength",
+    fig.add_trace(go.Scatter(x=s4.index,y=s4,name="AlphaRank",
         line=dict(width=1.4,color=CYAN),fill="tozeroy",fillcolor="rgba(62,193,211,0.08)"),row=2,col=1)
     fig.update_layout(xaxis_rangeslider_visible=False, dragmode="zoom",
         newshape=dict(line=dict(color=AMBER,width=2)))
@@ -1090,7 +1090,7 @@ def strategy_positions(d, strategy, buy_th=72, sell_th=42):
 # strategy -> (label, needs_thresholds, default_buy, default_sell, buy_caption, sell_caption)
 BT_STRATEGIES={
  "signal":   ("AlphaWire signal (BUY / SELL)", False, 72,42,"",""),
- "strength": ("Strength threshold",            True, 72,42,"Go long when strength ≥","Go to cash when strength ≤"),
+ "strength": ("AlphaRank threshold",            True, 72,42,"Go long when AlphaRank ≥","Go to cash when AlphaRank ≤"),
  "rsi":      ("RSI threshold",                 True, 35,70,"Go long when RSI ≤ (oversold)","Go to cash when RSI ≥ (overbought)"),
  "macd":     ("MACD cross (line vs signal)",   False,72,42,"",""),
  "ema":      ("EMA 50/200 cross",              False,72,42,"",""),
@@ -1518,9 +1518,9 @@ def pick_indicator():
     """Reliable tappable chips (falls back to a dropdown on older Streamlit)."""
     if hasattr(st,"pills"):
         ch=st.pills("Tap an indicator to expand its chart",INDICATORS,
-                    default="STRENGTH",selection_mode="single",key="indpick")
-        return ch or "STRENGTH"
-    return st.selectbox("Expand indicator",INDICATORS,index=INDICATORS.index("STRENGTH"),key="indpick")
+                    default="ALPHARANK",selection_mode="single",key="indpick")
+        return ch or "ALPHARANK"
+    return st.selectbox("Expand indicator",INDICATORS,index=INDICATORS.index("ALPHARANK"),key="indpick")
 
 # ==========================================================================
 # UI
@@ -1941,9 +1941,9 @@ if tickers and (run or any(syms)):
                 else:
                     _strat,_buy,_sell=bt_strategy,bt_buy,bt_sell
                     if _strat=="strength":
-                        strat_name=f"Strength ≥{_buy} / ≤{_sell}"
-                        rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {_buy}**, "
-                              f"go to **cash when strength ≤ {_sell}** (hold in between).")
+                        strat_name=f"AlphaRank ≥{_buy} / ≤{_sell}"
+                        rule=(f"**Strategy:** hold the stock when **AlphaRank ≥ {_buy}**, "
+                              f"go to **cash when AlphaRank ≤ {_sell}** (hold in between).")
                     elif _strat=="rsi":
                         strat_name=f"RSI ≤{_buy} / ≥{_sell}"
                         rule=(f"**Strategy:** buy when **RSI ≤ {_buy}** (oversold), sell to cash when "

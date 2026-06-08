@@ -87,6 +87,31 @@ hr {{ border-color:rgba(255,255,255,0.08); }}
 </style>
 """, unsafe_allow_html=True)
 
+# Force dark, readable form controls even if the dark theme config isn't applied
+st.markdown("""
+<style>
+.stTextInput input, .stNumberInput input, .stTextArea textarea,
+[data-baseweb="input"] input, [data-baseweb="base-input"] input {
+  background:#0d1622 !important; color:#e6edf3 !important; -webkit-text-fill-color:#e6edf3 !important;
+  border:1px solid rgba(255,255,255,0.12) !important;
+}
+[data-baseweb="select"] > div, [data-baseweb="select"] div[role="button"] {
+  background:#0d1622 !important; color:#e6edf3 !important; border-color:rgba(255,255,255,0.12) !important;
+}
+[data-baseweb="select"] svg { fill:#9aa4b2 !important; }
+[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"], ul[role="listbox"] {
+  background:#101b2b !important; color:#e6edf3 !important;
+}
+[role="option"], li[role="option"] { background:#101b2b !important; color:#e6edf3 !important; }
+[role="option"]:hover, li[role="option"]:hover { background:#16233a !important; }
+[data-baseweb="tag"] { background:rgba(22,199,132,0.22) !important; color:#e6edf3 !important; }
+[data-baseweb="tag"] svg { fill:#e6edf3 !important; }
+input::placeholder, textarea::placeholder { color:#7d8694 !important; }
+/* selection pills/chips */
+[data-testid="stPills"] button, .stPills button { color:#e6edf3 !important; }
+</style>
+""", unsafe_allow_html=True)
+
 PLOTLY_FONT = dict(family="IBM Plex Mono, monospace", color=TXT, size=12)
 def dark(fig, h=420):
     fig.update_layout(height=h, template="plotly_dark", font=PLOTLY_FONT,
@@ -97,7 +122,9 @@ def dark(fig, h=420):
     fig.update_yaxes(gridcolor=GRID, zeroline=False)
     return fig
 
-# ==========================================================================
+# modebar config that turns on drawing tools (trend lines, boxes, freehand, erase)
+PLOTLY_DRAW={"displaylogo":False,"scrollZoom":True,
+    "modeBarButtonsToAdd":["drawline","drawopenpath","drawrect","drawcircle","eraseshape"]}
 # INDICATOR MATH
 # ==========================================================================
 def ema(s,n): return s.ewm(span=n,adjust=False).mean()
@@ -260,6 +287,32 @@ def get_fundamentals(t):
         hi52=g("fiftyTwoWeekHigh"), lo52=g("fiftyTwoWeekLow"),
         avg_vol=g("averageVolume","averageDailyVolume10Day"),
         volume=g("volume","regularMarketVolume"))
+
+def _extract_fin(stmt):
+    """Pull revenue + net income series out of a yfinance income statement frame."""
+    if stmt is None or getattr(stmt,"empty",True): return None
+    def row(*names):
+        for n in names:
+            if n in stmt.index: return stmt.loc[n]
+        return None
+    rev=row("Total Revenue","TotalRevenue")
+    ni=row("Net Income","NetIncome","Net Income Common Stockholders")
+    if rev is None and ni is None: return None
+    cols=list(stmt.columns)
+    def val(s,c): return float(s[c]) if (s is not None and pd.notna(s[c])) else np.nan
+    df=pd.DataFrame({"period":[pd.Timestamp(c).strftime("%Y-%m") for c in cols],
+        "revenue":[val(rev,c) for c in cols],"net_income":[val(ni,c) for c in cols]})
+    return df.iloc[::-1].reset_index(drop=True)   # oldest -> newest
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def get_financials(t):
+    out={"annual":None,"quarterly":None}
+    try:
+        tk=yf.Ticker(t)
+        out["annual"]=_extract_fin(tk.income_stmt)
+        out["quarterly"]=_extract_fin(tk.quarterly_income_stmt)
+    except Exception: pass
+    return out
 
 def human(n):
     if n is None: return "—"
@@ -454,7 +507,7 @@ def overlay_indicator(name, data):
     fig.update_layout(title=title)
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr):
+def price_signals(o, state_series, strength_series, tkr, big=False):
     d=o.tail(180)
     buys,sells=alternating_signals(state_series)
     idx=state_series.index
@@ -477,8 +530,9 @@ def price_signals(o, state_series, strength_series, tkr):
     s4=strength_series.tail(180)
     fig.add_trace(go.Scatter(x=s4.index,y=s4,name="strength",
         line=dict(width=1.4,color=CYAN),fill="tozeroy",fillcolor="rgba(62,193,211,0.08)"),row=2,col=1)
-    fig.update_layout(xaxis_rangeslider_visible=False)
-    return dark(fig,560)
+    fig.update_layout(xaxis_rangeslider_visible=False, dragmode="zoom",
+        newshape=dict(line=dict(color=AMBER,width=2)))
+    return dark(fig, 820 if big else 560)
 
 def backtest(o, state_series, cost=0.001):
     """Long/flat timing test of the BUY/HOLD/SELL signal vs buy & hold.
@@ -513,6 +567,33 @@ def equity_chart(bt, tkr):
     fig.update_layout(title=f"{tkr} — $100 invested: signals vs buy &amp; hold")
     return dark(fig,360)
 
+SCORE_LABELS={"trend50":"Price vs EMA50","trend200":"Price vs EMA200","cross":"EMA 50/200 cross",
+ "di":"DI direction","rsi":"RSI","macd":"MACD","stoch":"Stochastic","boll":"Bollinger",
+ "obv":"OBV","mfi":"MFI","rs":"Rel strength","vix":"VIX","news":"News"}
+
+def score_breakdown(d):
+    """Per-indicator contribution (vote × weight) summing to the composite -> strength."""
+    v=d["votes"].iloc[-1]
+    contrib={k:(d["news_vote"] if k=="news" else float(v.get(k,0)))*WEIGHTS[k] for k in WEIGHTS}
+    s=pd.Series(contrib).reindex(list(WEIGHTS.keys()))
+    labels=[SCORE_LABELS[k] for k in s.index]
+    colors=[GREEN if x>0 else RED if x<0 else MUTE for x in s.values]
+    fig=go.Figure(go.Bar(x=s.values,y=labels,orientation="h",marker_color=colors,
+        text=[f"{x:+.1f}" for x in s.values],textposition="outside",cliponaxis=False))
+    fig.update_layout(title="Contribution to score (points = vote × weight)",
+        xaxis_title="points",yaxis=dict(autorange="reversed"))
+    fig=dark(fig,420)
+    comp=float(s.sum()); maxw=float(sum(abs(w) for w in WEIGHTS.values()))
+    strength=round((comp/maxw+1)/2*100)
+    return fig,comp,maxw,strength
+
+def financials_chart(df, tkr, title):
+    fig=go.Figure()
+    fig.add_trace(go.Bar(x=df["period"],y=df["revenue"]/1e9,name="Revenue ($B)",marker_color=CYAN))
+    fig.add_trace(go.Bar(x=df["period"],y=df["net_income"]/1e9,name="Net income ($B)",marker_color=GREEN))
+    fig.update_layout(title=title,barmode="group")
+    return dark(fig,300)
+
 def render_movers():
     st.caption("Biggest 1-day movers in the chosen index. Tap up to 5, then load them in.")
     src=st.selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
@@ -531,11 +612,22 @@ def render_movers():
     for i in show.index:
         c=GREEN if top.loc[i,"chg"]>=0 else RED
         csscol.loc[i,"% move"]=f"color:{c};font-weight:600"
-    st.dataframe(show.style.apply(lambda _:csscol,axis=None),use_container_width=True,height=300,hide_index=True)
-    picks=st.multiselect("Pick up to 5",top["ticker"].tolist(),max_selections=5,key="mv_pick")
+    st.dataframe(show.style.apply(lambda _:csscol,axis=None),use_container_width=True,height=260,hide_index=True)
+    st.markdown("**👇 Tap up to 5 tickers to select them:**")
+    chgmap=dict(zip(top["ticker"],top["chg"]))
+    opts=top["ticker"].head(28).tolist()   # tappable chips for the top movers
+    if hasattr(st,"pills"):
+        picks=st.pills("Selected tickers",opts,selection_mode="multi",key="mv_pills",
+                       format_func=lambda t:f"{t} {chgmap[t]:+.0f}%") or []
+    else:
+        picks=st.multiselect("Pick up to 5",opts,max_selections=5,key="mv_pills")
+    if len(picks)>5:
+        st.warning("Max 5 — using your first five.")
+        picks=picks[:5]
+    st.caption(f"Selected: {', '.join(picks) if picks else 'none yet'}")
     if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
         st.session_state["_load_syms"]=list(picks)[:5]
-        st.session_state.pop("mv_pick",None)
+        st.session_state.pop("mv_pills",None)
         st.rerun()
 
 # real modal if available (Streamlit >=1.37), else inline fallback
@@ -688,7 +780,36 @@ if tickers and (run or any(syms)):
                 st.markdown(f"<div style='font-family:\"Chakra Petch\";font-size:15px;color:{TXT}'>{f.get('name',t)}"
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
-                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t),use_container_width=True)
+
+                # ---- score breakdown: what builds the rating number ----
+                st.markdown("##### 🔢 How this score is built")
+                bfig,comp,maxw,bstr=score_breakdown(d)
+                st.plotly_chart(bfig,use_container_width=True)
+                st.caption(f"Sum of contributions = **{comp:+.1f}** out of ±{maxw:.0f} possible "
+                           f"→ ( {comp:+.1f}/{maxw:.0f} +1 )÷2 = **{d['strength']}/100** → **{d['state']}**. "
+                           "VIX/News shift the live score; the historical chart uses the technical part only.")
+
+                # ---- price + signals (with drawing tools; expandable) ----
+                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t),
+                                use_container_width=True,config=PLOTLY_DRAW)
+                with st.expander("🔍 Expand chart + drawing tools"):
+                    st.caption("Use the toolbar (top-right of the chart): the line / rectangle / circle / "
+                               "freehand icons draw on the chart; the eraser removes shapes.")
+                    st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,big=True),
+                                    use_container_width=True,config=PLOTLY_DRAW,key=f"big_{t}")
+
+                # ---- financial results (revenue & net income) ----
+                fin=get_financials(t)
+                if fin and (fin["annual"] is not None or fin["quarterly"] is not None):
+                    with st.expander("📊 Financial results — revenue & net income"):
+                        if fin["annual"] is not None:
+                            st.plotly_chart(financials_chart(fin["annual"],t,f"{t} — annual"),
+                                            use_container_width=True,key=f"finA_{t}")
+                        if fin["quarterly"] is not None:
+                            st.plotly_chart(financials_chart(fin["quarterly"],t,f"{t} — quarterly"),
+                                            use_container_width=True,key=f"finQ_{t}")
+                        st.caption("Source: Yahoo. Free depth ≈ last 4 fiscal years and ~4–5 recent quarters "
+                                   "(full 5-year quarterly history requires a paid data feed).")
 
                 # ---- backtest: signals vs buy & hold ----
                 st.markdown("##### 📉 Backtest — signals vs buy &amp; hold")

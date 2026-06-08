@@ -667,8 +667,8 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         buys,sells=alternating_signals(state_series); idx=state_series.index
     bi=[i for i in buys if idx[i] in d.index]
     si=[i for i in sells if idx[i] in d.index]
-    fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.05,row_heights=[0.7,0.3],
-                      subplot_titles=(f"{tkr} — price + signals","strength (0-100)"))
+    fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.07,row_heights=[0.7,0.3],
+                      subplot_titles=("","strength (0-100)"))
     if style=="line":
         fig.add_trace(go.Scatter(x=d.index,y=d.Close,name="price",mode="lines",
             line=dict(width=1.8,color=TXT)),row=1,col=1)
@@ -696,9 +696,9 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
             if tr["sp"]>=tr["bp"]: wx+=seg_x; wy+=seg_y
             else: lx+=seg_x; ly+=seg_y
         if wx: fig.add_trace(go.Scatter(x=wx,y=wy,mode="lines",line=dict(color=GREEN,width=1.3),
-            opacity=0.6,name="winning trade",hoverinfo="skip"),row=1,col=1)
+            opacity=0.6,name="winning trade",hoverinfo="skip",showlegend=False),row=1,col=1)
         if lx: fig.add_trace(go.Scatter(x=lx,y=ly,mode="lines",line=dict(color=RED,width=2.4),
-            opacity=0.95,name="losing trade (sold below buy)",hoverinfo="skip"),row=1,col=1)
+            opacity=0.95,name="losing trade (sold below buy)",hoverinfo="skip",showlegend=False),row=1,col=1)
     if bi:
         fig.add_trace(go.Scatter(x=[idx[i] for i in bi],
             y=[float(o.Close.loc[idx[i]]) for i in bi],mode="markers",name="BUY",
@@ -716,7 +716,7 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
                 txt.append((title[:80]+"…") if len(title)>80 else title)
                 col.append(GREEN if sc>0.05 else RED if sc<-0.05 else MUTE)
         if xs:
-            fig.add_trace(go.Scatter(x=xs,y=ys,mode="markers",name="news",
+            fig.add_trace(go.Scatter(x=xs,y=ys,mode="markers",name="news",showlegend=False,
                 marker=dict(symbol="diamond",size=8,color=col,line=dict(width=0.5,color="#000")),
                 text=txt,hovertemplate="📰 %{text}<extra></extra>"),row=1,col=1)
     s4=strength_series.reindex(d.index)
@@ -825,6 +825,76 @@ def equity_chart(bt, tkr, label="Strategy"):
         fill="tonexty",fillcolor="rgba(22,199,132,0.06)"))
     fig.update_layout(title=f"{tkr} — $100 invested: {label} vs buy &amp; hold")
     return dark(fig,360)
+
+# ---- bespoke per-stock optimizer: tune on the TRAIN half, score on the untouched TEST half ----
+# Searching params on one stock's history finds the rule that best fit its PAST. The only honest
+# question is whether that same rule survives on data it never saw -> the test half stands in for
+# "the future". This is what separates a real edge from a curve-fit.
+OPT_GRIDS={
+ "rsi":      [(b,s) for b in range(10,55,5) for s in range(55,90,5)],
+ "strength": [(b,s) for b in range(55,95,5) for s in range(15,55,5) if s<b-5],
+ "signal":   [(72,42)],   # no tunable threshold
+ "macd":     [(72,42)],
+ "ema":      [(72,42)],
+}
+
+def _split_idx(n, frac): return max(40, min(n-40, int(round(n*frac))))
+
+def optimize_for_ticker(d, strategies, split_frac=0.7, cost=0.001):
+    """For each strategy, find the (buy,sell) that MAXIMISES return on the TRAIN half, then report
+    that SAME rule's return on the untouched TEST half. Rows sorted by in-sample return (the
+    seductive number) so the drop to out-of-sample is obvious at a glance."""
+    o=d["o"]; n=len(o); k=_split_idx(n,split_frac)
+    tr_o, te_o = o.iloc[:k], o.iloc[k:]
+    out=[]
+    for strat in strategies:
+        if strat not in BT_STRATEGIES: continue
+        label=BT_STRATEGIES[strat][0]; grid=OPT_GRIDS.get(strat,[(72,42)]); best=None
+        for (b,s) in grid:
+            pos=strategy_positions(d,strat,b,s)
+            r=backtest(tr_o, pos.iloc[:k], cost=cost)["strat_ret"]
+            if best is None or r>best[0]: best=(r,b,s,pos)
+        _,bb,ss,pos=best
+        bt_tr=backtest(tr_o, pos.iloc[:k], cost=cost)
+        bt_te=backtest(te_o, pos.iloc[k:], cost=cost)   # SAME rule, unseen data, equity restarts at $1
+        out.append(dict(strat=strat,label=label,buy=bb,sell=ss,tunable=len(grid)>1,
+            train_ret=bt_tr["strat_ret"], test_ret=bt_te["strat_ret"],
+            bh_train=bt_tr["bh_ret"], bh_test=bt_te["bh_ret"],
+            test_trades=bt_te["trades"], test_exp=bt_te["exposure"],
+            train_beat=bt_tr["strat_ret"]>bt_tr["bh_ret"],
+            test_beat=bt_te["strat_ret"]>bt_te["bh_ret"]))
+    out.sort(key=lambda r:r["train_ret"],reverse=True)
+    return dict(rows=out,k=k,n=n,
+        train_start=str(o.index[0])[:10],split_date=str(o.index[k])[:10],test_end=str(o.index[-1])[:10],
+        survivors=sum(r["test_beat"] for r in out),total=len(out))
+
+def _opt_params_str(r):
+    return (f"RSI {r['buy']}/{r['sell']}" if r['strat']=="rsi" else
+            f"≥{r['buy']} / ≤{r['sell']}" if r['strat']=="strength" else "—")
+
+def optimize_table_html(res):
+    TD=f"padding:6px 9px;border-bottom:1px solid {GRID}"
+    TH=f"padding:7px 9px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid {GRID};vertical-align:bottom"
+    body=[]
+    for r in res["rows"]:
+        tc=GREEN if r["test_ret"]>=r["bh_test"] else RED
+        verdict=(f"<span style='color:{GREEN};font-weight:700'>BEAT B&amp;H</span>" if r["test_beat"]
+                 else f"<span style='color:{RED}'>missed</span>")
+        body.append(
+            f"<tr><td style='{TD};color:{TXT}'>{r['label']}</td>"
+            f"<td style='{TD};color:{MUTE};font-family:\"IBM Plex Mono\",monospace'>{_opt_params_str(r)}</td>"
+            f"<td style='{TD};color:{GREEN};text-align:right;font-weight:600'>{r['train_ret']:+.0f}%</td>"
+            f"<td style='{TD};color:{tc};text-align:right;font-weight:700'>{r['test_ret']:+.0f}%</td>"
+            f"<td style='{TD};color:{MUTE};text-align:right'>{r['bh_test']:+.0f}%</td>"
+            f"<td style='{TD};text-align:right'>{verdict}</td></tr>")
+    head=(f"<tr><th style='{TH}'>Strategy</th><th style='{TH}'>Best fit</th>"
+          f"<th style='{TH};text-align:right'>In-sample<br><span style='font-size:9px;color:{GREEN}'>tuned · the fantasy</span></th>"
+          f"<th style='{TH};text-align:right'>Out-of-sample<br><span style='font-size:9px;color:{AMBER}'>unseen · the truth</span></th>"
+          f"<th style='{TH};text-align:right'>Buy &amp; hold<br><span style='font-size:9px'>test half</span></th>"
+          f"<th style='{TH};text-align:right'>Verdict<br><span style='font-size:9px'>out-of-sample</span></th></tr>")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(body)}</table></div>")
 
 SCORE_LABELS={"trend50":"Price vs EMA50","trend200":"Price vs EMA200","cross":"EMA 50/200 cross",
  "di":"DI direction","rsi":"RSI","macd":"MACD","stoch":"Stochastic","boll":"Bollinger",
@@ -1099,31 +1169,41 @@ if tickers and (run or any(syms)):
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
 
                 # ---- resolve the chosen backtest strategy ONCE (drives both chart + backtest) ----
-                if bt_strategy=="strength":
-                    strat_name=f"Strength ≥{bt_buy} / ≤{bt_sell}"
-                    rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {bt_buy}**, "
-                          f"go to **cash when strength ≤ {bt_sell}** (hold in between).")
-                elif bt_strategy=="rsi":
-                    strat_name=f"RSI ≤{bt_buy} / ≥{bt_sell}"
-                    rule=(f"**Strategy:** buy when **RSI ≤ {bt_buy}** (oversold), sell to cash when "
-                          f"**RSI ≥ {bt_sell}** (overbought) — a mean-reversion rule.")
-                elif bt_strategy=="macd":
+                # A per-ticker BESPOKE rule (locked from the optimizer) overrides the global sidebar choice.
+                _bsp=st.session_state.get(f"bespoke_{t}")
+                _strat=_bsp["strat"] if _bsp else bt_strategy
+                _buy  =_bsp["buy"]   if _bsp else bt_buy
+                _sell =_bsp["sell"]  if _bsp else bt_sell
+                if _strat=="strength":
+                    strat_name=f"Strength ≥{_buy} / ≤{_sell}"
+                    rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {_buy}**, "
+                          f"go to **cash when strength ≤ {_sell}** (hold in between).")
+                elif _strat=="rsi":
+                    strat_name=f"RSI ≤{_buy} / ≥{_sell}"
+                    rule=(f"**Strategy:** buy when **RSI ≤ {_buy}** (oversold), sell to cash when "
+                          f"**RSI ≥ {_sell}** (overbought) — a mean-reversion rule.")
+                elif _strat=="macd":
                     strat_name="MACD cross"
                     rule="**Strategy:** hold while the **MACD line is above its signal line**, cash when below."
-                elif bt_strategy=="ema":
+                elif _strat=="ema":
                     strat_name="EMA 50/200 cross"
                     rule="**Strategy:** hold while **EMA50 ≥ EMA200** (golden cross), cash on death cross."
                 else:
                     strat_name="AlphaWire signal"
                     rule=("**Strategy:** hold while the signal is **BUY**, cash on **SELL** "
                           "(**HOLD** keeps the prior position) — the composite shown above.")
-                pos=strategy_positions(d,bt_strategy,bt_buy,bt_sell)
+                if _bsp:
+                    strat_name="🔬 "+strat_name
+                    rule=(f"<span style='color:{AMBER}'>**Bespoke rule locked for {t}**</span> "
+                          f"(tuned to its own history) — overriding the sidebar. "+rule)
+                pos=strategy_positions(d,_strat,_buy,_sell)
 
                 # ---- price chart: ACTUAL trades of the chosen strategy + drawing tools ----
                 st.markdown(f"##### 📈 Price &amp; trades — {strat_name}")
-                st.caption(f"Full backtest window. ▲/▼ = where **{strat_name}** buys / sells; **green shading = "
-                           "holding the stock, dark = in cash.** Watch the dark gaps during rallies — that missed "
-                           "upside is usually why a strategy trails buy & hold. Diamonds are news; toolbar = drawing tools."
+                st.caption(f"Full backtest window. ▲/▼ = where **{strat_name}** buys / sells, joined by a thin line "
+                           "(**green = that trade won, red = it lost**). **Green shading = holding, dark = in cash** — "
+                           "the dark gaps during rallies are the missed upside that makes a strategy trail buy & hold. "
+                           "Diamonds are news; toolbar = drawing tools."
                            + (" Dotted amber = Fibonacci." if show_fib else ""))
                 st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
                                     big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style,trade_pos=pos),
@@ -1170,6 +1250,53 @@ if tickers and (run or any(syms)):
                            "next-day execution (no look-ahead). Tune the rule in the sidebar; "
                            "**most timing rules underperform buy & hold on a stock that mostly rose.**")
 
+                # ---- BESPOKE OPTIMIZER: fit each rule to this stock's past, then test it out-of-sample ----
+                with st.expander(f"🔬 Find {t}'s best-fit rule — and test it on data it never saw"):
+                    st.caption("Tunes each rule to the **early** part of this stock's history, then scores that "
+                               "exact rule on the **recent** part held out as unseen. The in-sample column is the "
+                               "fit; the **out-of-sample column is the only one that says anything about the future.** "
+                               "A big gap between them = curve-fitting.")
+                    oc=st.columns(2)
+                    split_pct=oc[0].slider("Train on first … of history",50,85,70,5,key=f"split_{t}",
+                        help="The remainder is held out as the out-of-sample test — a stand-in for the future.")
+                    opt_set=oc[1].multiselect("Rules to search",list(BT_STRATEGIES.keys()),
+                        default=list(BT_STRATEGIES.keys()),format_func=lambda k:BT_STRATEGIES[k][0],key=f"optset_{t}")
+                    if st.button(f"⚡ Optimise {t}",key=f"optrun_{t}",use_container_width=True) and opt_set:
+                        with st.spinner(f"Searching {t}'s parameter space on the train half…"):
+                            st.session_state[f"optres_{t}"]=optimize_for_ticker(
+                                d,opt_set,split_frac=split_pct/100,cost=bt_cost)
+                    ores=st.session_state.get(f"optres_{t}")
+                    if ores and ores["rows"]:
+                        st.markdown(optimize_table_html(ores),unsafe_allow_html=True)
+                        surv,tot=ores["survivors"],ores["total"]
+                        msg=("**None** survived — the glittering in-sample fits were curve-fit to this stock's "
+                             "past and fell apart on unseen data. That is the trap, made visible."
+                             if surv==0 else
+                             f"These held an edge on data they were never tuned on — promising, but re-check as "
+                             "fresh data arrives; an edge can fade.")
+                        st.caption(f"**{surv} of {tot}** rules beat buy &amp; hold **out-of-sample** "
+                                   f"(trained {ores['train_start']} → {ores['split_date']}, tested → "
+                                   f"{ores['test_end']}). {msg}")
+                        best_oos=max(ores["rows"],key=lambda r:r["test_ret"])
+                        opts=["—"]+[r["strat"] for r in ores["rows"]]
+                        def _lbl(k):
+                            if k=="—": return "Keep global sidebar rule"
+                            nm=BT_STRATEGIES[k][0]
+                            return nm+("  ·  ★ best out-of-sample" if k==best_oos["strat"] else "")
+                        pick=st.selectbox(f"Lock a rule onto {t} (drives its signal, chart & backtest going forward)",
+                            opts,format_func=_lbl,key=f"lockpick_{t}")
+                        lc=st.columns(2)
+                        if lc[0].button(f"🔒 Apply to {t}",key=f"lockbtn_{t}",use_container_width=True):
+                            if pick=="—": st.session_state.pop(f"bespoke_{t}",None)
+                            else:
+                                rr=next(r for r in ores["rows"] if r["strat"]==pick)
+                                st.session_state[f"bespoke_{t}"]=dict(strat=rr["strat"],buy=rr["buy"],sell=rr["sell"])
+                            st.rerun()
+                        if lc[1].button("↺ Clear bespoke",key=f"clr_{t}",use_container_width=True):
+                            st.session_state.pop(f"bespoke_{t}",None); st.rerun()
+                        st.caption("⚠️ Don't pick by the in-sample column — that's choosing the best curve-fit. "
+                                   "If you lock a rule, judge it by **out-of-sample** and keep re-testing.")
+
                 # ---- the REAL per-trade ledger (replaces eyeballing the chart) ----
                 tl=trade_log(d["o"],pos); ts=trade_log_stats(tl)
                 if ts["n"]:
@@ -1192,6 +1319,19 @@ if tickers and (run or any(syms)):
                             "To make +300% on a +83% stock, the in-cash periods would've had to *lose ~55%* — they didn't.")
                     with st.expander(f"📋 See all {ts['n']} trades (entry → exit → actual %)"):
                         st.markdown(trade_log_html(tl),unsafe_allow_html=True)
+
+                    # spelled-out arithmetic for the FIRST trades (the ones that "look hugely profitable")
+                    first=tl[:8]; eqs=100.0; lines=[]
+                    for j,tr in enumerate(first,1):
+                        eqs*=(1+tr["ret"])
+                        lines.append(f"{j}. bought **${tr['bp']:.2f}** → sold **${tr['sp']:.2f}** = "
+                                     f"**{tr['ret']*100:+.1f}%**  →  $100 is now **${eqs:.2f}**")
+                    biggest=max((t['ret'] for t in tl),default=0)*100
+                    st.markdown("**The first trades, spelled out with the real prices off your chart:**\n\n"
+                                + "\n\n".join(lines)
+                                + f"\n\n*(Reinvesting every time. The single biggest winner in all {ts['n']} trades "
+                                  f"was **{biggest:+.1f}%** — there is no 20%+ trade.)* "
+                                  "If any price here doesn't match the chart, that's the bug — tell me which line.")
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)

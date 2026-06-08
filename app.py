@@ -22,6 +22,8 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+import json as _json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
@@ -1840,7 +1842,40 @@ if tickers and (run or any(syms)):
 
         # PER-STOCK PRICE + SIGNALS
         st.markdown("#### Price & historical signals")
-        tabs=st.tabs(list(data.keys()))
+        _tk_order=list(data.keys())
+        tabs=st.tabs(_tk_order)
+        _tabcols=[verdict_color(data[_t]["state"]) for _t in _tk_order]
+        components.html(f"""
+        <script>
+        const COLORS={_json.dumps(_tabcols)};
+        function paint(){{
+          try{{
+            const doc=window.parent.document;
+            const lists=doc.querySelectorAll('[data-baseweb="tab-list"]');
+            if(!lists.length) return;
+            const list=lists[lists.length-1];
+            const tabs=list.querySelectorAll('button[data-baseweb="tab"]');
+            if(!tabs.length) return;
+            let active=0;
+            tabs.forEach((b,i)=>{{ if(b.getAttribute('aria-selected')==='true') active=i; }});
+            const c=COLORS[active]||'#16c784';
+            const wrap=list.parentElement;
+            const hl=wrap.querySelector('[data-baseweb="tab-highlight"]');
+            if(hl) hl.style.setProperty('background',c,'important');
+            tabs.forEach((b,i)=>{{
+              const p=b.querySelector('p')||b;
+              p.style.setProperty('color', i===active? c : '#c7d0db','important');
+            }});
+            const heads=doc.querySelectorAll('h4,h3,h2');
+            heads.forEach(h=>{{ if((h.textContent||'').indexOf('Price & historical signals')>-1)
+                                  h.style.setProperty('color',c,'important'); }});
+          }}catch(e){{}}
+        }}
+        clearInterval(window.__phsPaint);
+        window.__phsPaint=setInterval(paint,250);
+        paint();
+        </script>
+        """, height=0)
         for tab,(t,d) in zip(tabs,data.items()):
             with tab:
                 f=d["funda"]

@@ -689,14 +689,24 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
             fig.add_hline(y=y,line=dict(color="rgba(245,166,35,0.45)",width=1,dash="dot"),
                 annotation_text=f"{lvl*100:.1f}%  {y:.2f}",annotation_position="right",
                 annotation_font=dict(size=9,color=AMBER),row=1,col=1)
+    if trade_pos is not None:   # connect each BUY to its SELL; green = trade won, red = trade LOST
+        wx=[];wy=[];lx=[];ly=[]
+        for tr in trade_log(o,trade_pos):
+            seg_x=[tr["bi"],tr["si"],None]; seg_y=[tr["bp"],tr["sp"],None]
+            if tr["sp"]>=tr["bp"]: wx+=seg_x; wy+=seg_y
+            else: lx+=seg_x; ly+=seg_y
+        if wx: fig.add_trace(go.Scatter(x=wx,y=wy,mode="lines",line=dict(color=GREEN,width=1.3),
+            opacity=0.6,name="winning trade",hoverinfo="skip"),row=1,col=1)
+        if lx: fig.add_trace(go.Scatter(x=lx,y=ly,mode="lines",line=dict(color=RED,width=2.4),
+            opacity=0.95,name="losing trade (sold below buy)",hoverinfo="skip"),row=1,col=1)
     if bi:
         fig.add_trace(go.Scatter(x=[idx[i] for i in bi],
-            y=[o.Low.loc[idx[i]]*0.985 for i in bi],mode="markers",name="BUY",
-            marker=dict(symbol="triangle-up",size=14,color=GREEN,line=dict(width=1,color="#063"))),row=1,col=1)
+            y=[float(o.Close.loc[idx[i]]) for i in bi],mode="markers",name="BUY",
+            marker=dict(symbol="triangle-up",size=11,color=GREEN,line=dict(width=1,color="#063"))),row=1,col=1)
     if si:
         fig.add_trace(go.Scatter(x=[idx[i] for i in si],
-            y=[o.High.loc[idx[i]]*1.015 for i in si],mode="markers",name="SELL",
-            marker=dict(symbol="triangle-down",size=14,color=RED,line=dict(width=1,color="#600"))),row=1,col=1)
+            y=[float(o.Close.loc[idx[i]]) for i in si],mode="markers",name="SELL",
+            marker=dict(symbol="triangle-down",size=11,color=RED,line=dict(width=1,color="#600"))),row=1,col=1)
     if news_marks:
         ndt=_naive_idx(d); xs=[];ys=[];txt=[];col=[]
         for when,sc,title in news_marks:
@@ -766,6 +776,46 @@ def backtest(o, pos, cost=0.001):
         strat_mdd=mdd(eq)*100, bh_mdd=mdd(bh)*100,
         strat_sharpe=shp(strat), bh_sharpe=shp(ret),
         trades=int((switch>1e-9).sum()), exposure=float(pos_eff.mean())*100)
+
+def trade_log(o, pos):
+    """Every actual round-trip of a position series: buy at the entry-signal close,
+    sell at the exit-signal close. Returns list of dicts. Matches the backtest exactly:
+    the product of (1+ret) over these trades == the strategy's gross return."""
+    p=pos.fillna(0.0).values; c=o.Close.values; idx=o.index; out=[]; e=None
+    for i in range(len(p)):
+        if p[i]>0.5 and e is None: e=i
+        elif p[i]<=0.5 and e is not None:
+            out.append(dict(bi=idx[e],bp=float(c[e]),si=idx[i],sp=float(c[i]),ret=c[i]/c[e]-1,open=False)); e=None
+    if e is not None:
+        out.append(dict(bi=idx[e],bp=float(c[e]),si=idx[-1],sp=float(c[-1]),ret=c[-1]/c[e]-1,open=True))
+    return out
+
+def trade_log_stats(trades):
+    rets=[t["ret"] for t in trades]
+    if not rets: return dict(n=0,wins=0,losses=0,avg=0.0,gross=0.0,best=0.0,worst=0.0)
+    gross=float(np.prod([1+r for r in rets])-1)
+    return dict(n=len(rets),wins=sum(r>0 for r in rets),losses=sum(r<0 for r in rets),
+                avg=float(np.mean(rets)),gross=gross,best=max(rets),worst=min(rets))
+
+def trade_log_html(trades):
+    TD=f"padding:5px 9px;border-bottom:1px solid {GRID}"
+    TH=f"padding:6px 9px;color:{MUTE};font-size:10.5px;letter-spacing:.06em;text-align:left;border-bottom:1px solid {GRID}"
+    rows=[]; eq=100.0
+    for k,t in enumerate(trades,1):
+        eq*=(1+t["ret"])                      # reinvest each result -> compounding
+        c=GREEN if t["ret"]>=0 else RED
+        tag=" <span style='color:%s'>· open</span>"%MUTE if t.get("open") else ""
+        rows.append(f"<tr><td style='{TD};color:{MUTE}'>{k}</td>"
+            f"<td style='{TD};color:{TXT}'>{str(t['bi'])[:10]} @ {t['bp']:.2f}</td>"
+            f"<td style='{TD};color:{TXT}'>{str(t['si'])[:10]} @ {t['sp']:.2f}{tag}</td>"
+            f"<td style='{TD};color:{c};text-align:right;font-weight:600'>{t['ret']*100:+.1f}%</td>"
+            f"<td style='{TD};color:{CYAN};text-align:right'>${eq:,.2f}</td></tr>")
+    head=(f"<tr><th style='{TH}'>#</th><th style='{TH}'>Bought (close)</th>"
+          f"<th style='{TH}'>Sold (close)</th><th style='{TH};text-align:right'>Return</th>"
+          f"<th style='{TH};text-align:right'>Equity ($100 → compounding)</th></tr>")
+    return (f"<div style='max-height:360px;overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"IBM Plex Mono\",monospace;font-size:12px'>{head}{''.join(rows)}</table></div>")
 
 def equity_chart(bt, tkr, label="Strategy"):
     e=bt["eq"]/bt["eq"].iloc[0]*100; b=bt["bh"]/bt["bh"].iloc[0]*100
@@ -1119,6 +1169,29 @@ if tickers and (run or any(syms)):
                 st.caption(f"{verdict}{why}  **In-sample** test, {bt_cost*100:.2f}%/switch cost, "
                            "next-day execution (no look-ahead). Tune the rule in the sidebar; "
                            "**most timing rules underperform buy & hold on a stock that mostly rose.**")
+
+                # ---- the REAL per-trade ledger (replaces eyeballing the chart) ----
+                tl=trade_log(d["o"],pos); ts=trade_log_stats(tl)
+                if ts["n"]:
+                    bh_factor=1+bt["bh_ret"]/100.0
+                    in_factor=1+ts["gross"]
+                    out_pct=(bh_factor/in_factor-1)*100 if in_factor>0 else 0.0
+                    st.markdown(f"**Every actual trade:** {ts['n']} round-trips · "
+                        f"<span style='color:{GREEN}'>{ts['wins']} winners</span> / "
+                        f"<span style='color:{RED}'>{ts['losses']} losers</span> · "
+                        f"avg {ts['avg']*100:+.1f}% · best {ts['best']*100:+.1f}% · worst {ts['worst']*100:+.1f}%",
+                        unsafe_allow_html=True)
+                    st.caption(f"Buying at each green's close and selling at each red's close, **reinvesting each "
+                               f"result** (full compounding), turns **$100 into ${100*(1+ts['gross']):,.2f}** "
+                               f"= **{ts['gross']*100:+.0f}% before costs** across {ts['n']} trades — that's the strategy "
+                               "return above (costs trim it). The ledger's last 'Equity' row shows this build-up.")
+                    st.info(f"**The identity that caps this:** a stock's total growth = (growth while you HOLD it) × "
+                            f"(growth while you're in CASH). For {t}: buy & hold **{bt['bh_ret']:+.0f}%** = "
+                            f"trades **{ts['gross']*100:+.0f}%** × in-cash **{out_pct:+.0f}%**. "
+                            f"While this strategy sat in cash, {t} moved **{out_pct:+.0f}%** — the return it skipped. "
+                            "To make +300% on a +83% stock, the in-cash periods would've had to *lose ~55%* — they didn't.")
+                    with st.expander(f"📋 See all {ts['n']} trades (entry → exit → actual %)"):
+                        st.markdown(trade_log_html(tl),unsafe_allow_html=True)
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)

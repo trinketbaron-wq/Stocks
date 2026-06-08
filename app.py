@@ -617,7 +617,7 @@ def overlay_indicator(name, data):
     fig.update_layout(title=title)
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False):
+def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles"):
     d=o.tail(180)
     buys,sells=alternating_signals(state_series)
     idx=state_series.index
@@ -625,8 +625,12 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
     si=[i for i in sells if idx[i] in d.index]
     fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.05,row_heights=[0.7,0.3],
                       subplot_titles=(f"{tkr} — price + signals","strength (0-100)"))
-    fig.add_trace(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close,
-        name="px",increasing_line_color=GREEN,decreasing_line_color=RED),row=1,col=1)
+    if style=="line":
+        fig.add_trace(go.Scatter(x=d.index,y=d.Close,name="price",mode="lines",
+            line=dict(width=1.8,color=TXT)),row=1,col=1)
+    else:
+        fig.add_trace(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close,
+            name="px",increasing_line_color=GREEN,decreasing_line_color=RED),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA50,name="EMA50",line=dict(width=1,color=CYAN)),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA200,name="EMA200",line=dict(width=1,color=AMBER)),row=1,col=1)
     if fib:
@@ -663,14 +667,32 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         newshape=dict(line=dict(color=AMBER,width=2)))
     return dark(fig, 820 if big else 560)
 
-def strategy_positions(d, strategy, buy_th=75, sell_th=49):
+def strategy_positions(d, strategy, buy_th=72, sell_th=42):
     """Build a raw long(1)/flat(0) position series for the chosen backtest strategy."""
+    o=d["o"]
     if strategy=="strength":
         s=d["strength_series"]
         raw=np.where(s>=buy_th,1.0,np.where(s<=sell_th,0.0,np.nan))
         return pd.Series(raw,index=s.index).ffill().fillna(0.0)
+    if strategy=="rsi":
+        r=o["RSI"]                                   # long when oversold, exit when overbought
+        raw=np.where(r<=buy_th,1.0,np.where(r>=sell_th,0.0,np.nan))
+        return pd.Series(raw,index=o.index).ffill().fillna(0.0)
+    if strategy=="macd":                             # long while MACD line is above its signal
+        return (o["MACD"]>o["MACD_signal"]).astype(float)
+    if strategy=="ema":                              # golden/death cross
+        return (o["EMA50"]>=o["EMA200"]).astype(float)
     # default: the AlphaWire BUY/HOLD/SELL signal
     return d["state_series"].map({"BUY":1.0,"SELL":0.0,"HOLD":np.nan}).ffill().fillna(0.0)
+
+# strategy -> (label, needs_thresholds, default_buy, default_sell, buy_caption, sell_caption)
+BT_STRATEGIES={
+ "signal":   ("AlphaWire signal (BUY / SELL)", False, 72,42,"",""),
+ "strength": ("Strength threshold",            True, 72,42,"Go long when strength ≥","Go to cash when strength ≤"),
+ "rsi":      ("RSI threshold",                 True, 35,70,"Go long when RSI ≤ (oversold)","Go to cash when RSI ≥ (overbought)"),
+ "macd":     ("MACD cross (line vs signal)",   False,72,42,"",""),
+ "ema":      ("EMA 50/200 cross",              False,72,42,"",""),
+}
 
 def backtest(o, pos, cost=0.001):
     """Long/flat timing test of a position series vs buy & hold.
@@ -734,7 +756,7 @@ def financials_chart(df, tkr, title):
     return dark(fig,300)
 
 def render_movers():
-    st.caption("Biggest 1-day movers in the chosen index. Tap up to 5, then load them in.")
+    st.caption("Biggest 1-day movers in the chosen index. **Tap rows in the table** to select (up to 5), then load them.")
     src=st.selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
     with st.spinner(f"Scanning {src}…"):
         mv=fetch_movers(src)
@@ -742,38 +764,40 @@ def render_movers():
         st.error("Couldn't load movers right now (Yahoo may be rate-limiting). "
                  "Try again shortly, or just type tickers manually.")
         return
-    top=mv.head(40).copy()
-    show=top.copy()
-    show["chg"]=show["chg"].map(lambda x:f"{x:+.2f}%")
-    show["price"]=show["price"].map(lambda x:f"{x:,.2f}")
-    if "volume" in show.columns:
-        show["volume"]=show["volume"].map(lambda x:human(x) if pd.notna(x) else "—")
-        show=show[["ticker","chg","price","volume"]]
-        show.columns=["Ticker","% move","Price","Volume"]
-    else:
-        show=show[["ticker","chg","price"]]; show.columns=["Ticker","% move","Price"]
-    csscol=pd.DataFrame("",index=show.index,columns=show.columns)
+    top=mv.head(40).reset_index(drop=True)
+    show=pd.DataFrame({"Ticker":top["ticker"],
+        "% move":top["chg"].map(lambda x:f"{x:+.2f}%"),
+        "Price":top["price"].map(lambda x:f"{x:,.2f}")})
+    if "volume" in top.columns:
+        show["Volume"]=top["volume"].map(lambda x:human(x) if pd.notna(x) else "—")
+    css=pd.DataFrame("",index=show.index,columns=show.columns)
     for i in show.index:
-        c=GREEN if top.loc[i,"chg"]>=0 else RED
-        csscol.loc[i,"% move"]=f"color:{c};font-weight:600"
-    st.dataframe(show.style.apply(lambda _:csscol,axis=None),use_container_width=True,height=260,hide_index=True)
-    st.caption("A live AlphaWire **score** needs each name's full price history, so it's computed once "
-               "you load picks below (it then appears in the comparison matrix).")
-    st.markdown("**👇 Tap up to 5 tickers to select them:**")
-    chgmap=dict(zip(top["ticker"],top["chg"]))
-    opts=top["ticker"].head(28).tolist()   # tappable chips for the top movers
-    if hasattr(st,"pills"):
-        picks=st.pills("Selected tickers",opts,selection_mode="multi",key="mv_pills",
-                       format_func=lambda t:f"{t} {chgmap[t]:+.0f}%") or []
-    else:
-        picks=st.multiselect("Pick up to 5",opts,max_selections=5,key="mv_pills")
+        css.loc[i,"% move"]=f"color:{GREEN if top.loc[i,'chg']>=0 else RED};font-weight:600"
+    styled=show.style.apply(lambda _:css,axis=None)
+
+    picks=[]
+    try:    # native: tap rows to select (Streamlit ≥1.35)
+        ev=st.dataframe(styled,use_container_width=True,height=420,hide_index=True,
+                        on_select="rerun",selection_mode="multi-row",key="mv_table")
+        rows=(ev.selection.rows if hasattr(ev,"selection") else ev["selection"]["rows"])
+        picks=[top.loc[i,"ticker"] for i in rows]
+    except TypeError:   # older Streamlit: fall back to tappable chips (kept in table order)
+        st.dataframe(styled,use_container_width=True,height=300,hide_index=True)
+        chg=dict(zip(top["ticker"],top["chg"])); opts=top["ticker"].tolist()
+        if hasattr(st,"pills"):
+            picks=st.pills("Tap to select",opts,selection_mode="multi",key="mv_pills",
+                           format_func=lambda t:f"{t} {chg[t]:+.0f}%") or []
+        else:
+            picks=st.multiselect("Pick up to 5",opts,max_selections=5,key="mv_pills")
+
     if len(picks)>5:
-        st.warning("Max 5 — using your first five.")
-        picks=picks[:5]
-    st.caption(f"Selected: {', '.join(picks) if picks else 'none yet'}")
+        st.warning("Max 5 — using your first five."); picks=picks[:5]
+    st.caption("A live AlphaWire **score** needs each name's full price history, so it's computed when you "
+               "load picks (it then appears in the comparison matrix).")
+    st.caption(f"**Selected:** {', '.join(picks) if picks else 'tap rows above'}")
     if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
         st.session_state["_load_syms"]=list(picks)[:5]
-        st.session_state.pop("mv_pills",None)
+        st.session_state.pop("mv_pills",None); st.session_state.pop("mv_table",None)
         st.rerun()
 
 # real modal if available (Streamlit >=1.37), else inline fallback
@@ -851,19 +875,25 @@ with st.sidebar:
     period=st.selectbox("History window",["1y","2y","5y"],index=1)
 
     st.markdown("**Backtest strategy**")
-    bt_strategy_label=st.selectbox("Rule to test",
-        ["AlphaWire signal (BUY / SELL)","Strength threshold"],
-        help="What decides when the backtest is long vs in cash.")
-    bt_strategy="strength" if bt_strategy_label.startswith("Strength") else "signal"
-    if bt_strategy=="strength":
-        bt_buy=st.slider("Go long when strength ≥",50,95,75,1)
-        bt_sell=st.slider("Go to cash when strength ≤",5,60,49,1)
-        if bt_sell>=bt_buy: st.caption("⚠️ Sell level should be below buy level.")
+    _keys=list(BT_STRATEGIES.keys())
+    bt_strategy=st.selectbox("Rule to test",_keys,
+        format_func=lambda k:BT_STRATEGIES[k][0],
+        help="What decides when the backtest is long (in the stock) vs in cash.")
+    _,need_th,db,ds,bcap,scap=BT_STRATEGIES[bt_strategy]
+    if need_th:
+        lo_b,hi_b=(50,95) if bt_strategy=="strength" else (5,60)
+        lo_s,hi_s=(5,60) if bt_strategy=="strength" else (40,90)
+        bt_buy=st.slider(bcap,lo_b,hi_b,db,1)
+        bt_sell=st.slider(scap,lo_s,hi_s,ds,1)
+        if bt_strategy=="strength" and bt_sell>=bt_buy:
+            st.caption("⚠️ Sell level should be below buy level.")
     else:
-        bt_buy,bt_sell=75,49
+        bt_buy,bt_sell=db,ds
     bt_cost=st.slider("Trade cost (% per switch)",0.0,0.5,0.10,0.05,
         help="Charged each time the strategy moves in or out of the stock.")/100
 
+    st.markdown("**Charts**")
+    chart_style="line" if st.radio("Price style",["Candlestick","Line"],horizontal=True)=="Line" else "candles"
     show_fib=st.toggle("Fibonacci levels on charts",value=False,
         help="Auto-draws retracement lines from the visible swing high/low. "
              "(Plotly has no freehand Fib tool; use the line tool for custom ones.)")
@@ -975,7 +1005,7 @@ if tickers and (run or any(syms)):
                            "circle, and the eraser. Diamonds mark news, colored by sentiment."
                            + (" Dotted amber lines are Fibonacci retracement levels." if show_fib else ""))
                 st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
-                                    big=True,news_marks=d["news_marks"],fib=show_fib),
+                                    big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style),
                                 use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
 
                 # ---- financial results (revenue & net income) ----
@@ -994,12 +1024,22 @@ if tickers and (run or any(syms)):
                 # ---- backtest: chosen strategy vs buy & hold ----
                 if bt_strategy=="strength":
                     strat_name=f"Strength ≥{bt_buy} / ≤{bt_sell}"
-                    rule=(f"**Strategy:** hold the stock when its AlphaWire **strength is ≥ {bt_buy}**, "
-                          f"move to **cash when strength ≤ {bt_sell}** (hold position in between).")
+                    rule=(f"**Strategy:** hold the stock when AlphaWire **strength ≥ {bt_buy}**, "
+                          f"go to **cash when strength ≤ {bt_sell}** (hold in between).")
+                elif bt_strategy=="rsi":
+                    strat_name=f"RSI ≤{bt_buy} / ≥{bt_sell}"
+                    rule=(f"**Strategy:** buy when **RSI ≤ {bt_buy}** (oversold), sell to cash when "
+                          f"**RSI ≥ {bt_sell}** (overbought) — a mean-reversion rule.")
+                elif bt_strategy=="macd":
+                    strat_name="MACD cross"
+                    rule="**Strategy:** hold while the **MACD line is above its signal line**, cash when below."
+                elif bt_strategy=="ema":
+                    strat_name="EMA 50/200 cross"
+                    rule="**Strategy:** hold while **EMA50 ≥ EMA200** (golden cross), cash on death cross."
                 else:
                     strat_name="AlphaWire signal"
-                    rule="**Strategy:** hold the stock while the signal is **BUY**, move to **cash on SELL** "
-                    rule+="(**HOLD** keeps the prior position). Signal = the same composite shown above."
+                    rule=("**Strategy:** hold while the signal is **BUY**, cash on **SELL** "
+                          "(**HOLD** keeps the prior position) — the composite shown above.")
                 st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
                 st.caption(rule)
                 pos=strategy_positions(d,bt_strategy,bt_buy,bt_sell)

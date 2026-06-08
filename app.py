@@ -480,6 +480,39 @@ def price_signals(o, state_series, strength_series, tkr):
     fig.update_layout(xaxis_rangeslider_visible=False)
     return dark(fig,560)
 
+def backtest(o, state_series, cost=0.001):
+    """Long/flat timing test of the BUY/HOLD/SELL signal vs buy & hold.
+    NO LOOK-AHEAD: the signal is read at a day's close, so the position only
+    takes effect the NEXT bar (pos.shift(1)). A cost is charged on every switch.
+    """
+    ret=o.Close.pct_change().fillna(0.0)
+    pos=state_series.map({"BUY":1.0,"SELL":0.0,"HOLD":np.nan}).ffill().fillna(0.0)
+    pos_eff=pos.shift(1).fillna(0.0)                 # act the day AFTER the signal
+    switch=pos_eff.diff().abs().fillna(0.0)
+    strat=pos_eff*ret - switch*cost                  # subtract trading cost on switches
+    eq=(1+strat).cumprod(); bh=(1+ret).cumprod()
+    def cagr(e):
+        yrs=max((e.index[-1]-e.index[0]).days/365.25,1e-9)
+        return e.iloc[-1]**(1/yrs)-1
+    def mdd(e): return float((e/e.cummax()-1).min())
+    def shp(r):
+        sd=r.std(); return float(r.mean()/sd*np.sqrt(252)) if sd>0 else 0.0
+    return dict(eq=eq, bh=bh,
+        strat_ret=(eq.iloc[-1]-1)*100, bh_ret=(bh.iloc[-1]-1)*100,
+        strat_cagr=cagr(eq)*100, bh_cagr=cagr(bh)*100,
+        strat_mdd=mdd(eq)*100, bh_mdd=mdd(bh)*100,
+        strat_sharpe=shp(strat), bh_sharpe=shp(ret),
+        trades=int((switch>1e-9).sum()), exposure=float(pos_eff.mean())*100)
+
+def equity_chart(bt, tkr):
+    e=bt["eq"]/bt["eq"].iloc[0]*100; b=bt["bh"]/bt["bh"].iloc[0]*100
+    fig=go.Figure()
+    fig.add_trace(go.Scatter(x=b.index,y=b,name="Buy & hold",line=dict(width=1.4,color=MUTE)))
+    fig.add_trace(go.Scatter(x=e.index,y=e,name="AlphaWire signals",line=dict(width=2,color=GREEN),
+        fill="tonexty",fillcolor="rgba(22,199,132,0.06)"))
+    fig.update_layout(title=f"{tkr} — $100 invested: signals vs buy &amp; hold")
+    return dark(fig,360)
+
 def render_movers():
     st.caption("Biggest 1-day movers in the chosen index. Tap up to 5, then load them in.")
     src=st.selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
@@ -563,6 +596,8 @@ api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
 with st.sidebar:
     st.header("⚙ Settings")
     period=st.selectbox("History window",["1y","2y","5y"],index=1)
+    bt_cost=st.slider("Backtest trade cost (% per switch)",0.0,0.5,0.10,0.05,
+        help="Charged each time the strategy moves in or out of the stock.")/100
     use_ai=st.toggle("Claude news sentiment",value=bool(api_key),disabled=not api_key,
         help="Add ANTHROPIC_API_KEY in Secrets to enable AI-graded news.") if api_key else False
     if not api_key: st.caption("ℹ️ Using built-in finance sentiment analyzer.")
@@ -654,6 +689,28 @@ if tickers and (run or any(syms)):
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
                 st.markdown(fundamentals_grid(f),unsafe_allow_html=True)
                 st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t),use_container_width=True)
+
+                # ---- backtest: signals vs buy & hold ----
+                st.markdown("##### 📉 Backtest — signals vs buy &amp; hold")
+                bt=backtest(d["o"],d["state_series"],cost=bt_cost)
+                st.plotly_chart(equity_chart(bt,t),use_container_width=True)
+                edge=bt["strat_ret"]-bt["bh_ret"]
+                r1=st.columns(3)
+                r1[0].metric("Strategy return",f"{bt['strat_ret']:+.1f}%",f"{edge:+.1f}% vs buy & hold")
+                r1[1].metric("Buy & hold",f"{bt['bh_ret']:+.1f}%")
+                r1[2].metric("Trades",f"{bt['trades']}")
+                r2=st.columns(3)
+                r2[0].metric("Max drawdown",f"{bt['strat_mdd']:.1f}%",
+                             f"{bt['strat_mdd']-bt['bh_mdd']:+.1f}% vs B&H")
+                r2[1].metric("Sharpe (strat)",f"{bt['strat_sharpe']:.2f}")
+                r2[2].metric("Time in market",f"{bt['exposure']:.0f}%")
+                verdict=("✅ Beat buy & hold over this window." if edge>0 else
+                         "➖ Roughly matched buy & hold." if abs(edge)<2 else
+                         "❌ Underperformed buy & hold here.")
+                st.caption(f"{verdict}  This is an **in-sample** test on the window above with "
+                           f"{bt_cost*100:.2f}%/switch costs and next-day execution (no look-ahead). "
+                           "Weights aren't optimized; past results don't predict the future.")
+
                 if d["titles"]:
                     sgn=np.sign(d["news_avg"]) if abs(d["news_avg"])>0.05 else 0
                     mom=d["strength_series"].iloc[-1]-50   # >0 bullish, <0 bearish

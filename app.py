@@ -154,15 +154,20 @@ button[kind="pills"], button[kind="pillsActive"]{
 [data-testid="stBaseButton-pillsActive"], [data-testid="stBaseButton-pillsActive"] *,
 [data-testid="stButtonGroup"] button[aria-checked="true"], [data-testid="stButtonGroup"] button[aria-checked="true"] *,
 button[kind="pillsActive"], button[kind="pillsActive"] *{ color:#ff6b73 !important; }
-/* ---- sidebar collapse / expand arrow: make the icon visible on dark ---- */
-[data-testid="stSidebarCollapseButton"] svg, [data-testid="stSidebarCollapse"] svg,
-[data-testid="collapsedControl"] svg, [data-testid="stSidebarHeader"] svg,
-[data-testid="stSidebarCollapsedControl"] svg, [data-testid="stExpandSidebarButton"] svg,
-[data-testid="stSidebarCollapseButton"] button, [data-testid="stSidebarHeader"] button{
-  fill:#e6edf3 !important; color:#e6edf3 !important; opacity:1 !important;
+/* ---- sidebar collapse / expand control: force the icon visible on dark (covers svg AND Material-font glyphs) ---- */
+[data-testid="stSidebarCollapseButton"], [data-testid="stSidebarCollapseButton"] *,
+[data-testid="stSidebarHeader"] button, [data-testid="stSidebarHeader"] button *,
+[data-testid="collapsedControl"], [data-testid="collapsedControl"] *,
+[data-testid="stSidebarCollapsedControl"], [data-testid="stSidebarCollapsedControl"] *,
+[data-testid="stExpandSidebarButton"], [data-testid="stExpandSidebarButton"] *,
+[data-testid="baseButton-headerNoPadding"], [data-testid="baseButton-headerNoPadding"] *,
+button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
+  color:#e6edf3 !important; fill:#e6edf3 !important;
+  opacity:1 !important; visibility:visible !important;
 }
-[data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"]{
-  background:rgba(255,255,255,0.06) !important; border-radius:8px !important;
+[data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
+  background:rgba(255,255,255,0.08) !important; border-radius:8px !important;
 }
 /* ---- universal readable text: labels, captions, body all near-white ---- */
 label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
@@ -409,14 +414,25 @@ PERIOD_YEARS={"1mo":0.1,"3mo":0.3,"6mo":0.5,"1y":1,"2y":2,"5y":5,"10y":10,"max":
 
 # ordered most-important first; first match wins
 MATERIAL_RULES=[
- ("Earnings",   ["earnings"," eps ","beats","misses","quarter result","quarterly result","q1 ","q2 ","q3 ","q4 ","results top","reports revenue","profit","loss per share"]),
- ("Guidance",   ["guidance","outlook","forecast","raises","cuts estimate","warns","lowers","raised its","cut its"]),
- ("M&A",        ["acqui","merger","to buy","buyout","takeover","to acquire","stake in","combine with","tender offer"]),
- ("Analyst",    ["upgrade","downgrade","price target","initiates","initiated","overweight","underweight","buy rating","sell rating","outperform","reiterates","raised pt","cut pt"]),
- ("Regulatory", ["fda","approval","approved","lawsuit","settlement","investigat","antitrust","probe","fine","recall","sec charges","subpoena","ruling"]),
- ("Capital",    ["buyback","repurchase","dividend","stock split","offering","raises $","convertible","debt offering","secondary"]),
- ("Product",    ["launch","unveil","announces","partnership","contract","awarded","wins ","secures","deal with","collaborat","new chip","new product"]),
- ("Management", ["ceo","cfo","resign","steps down","appoints","named ceo","executive","departure","interim"]),
+ ("Earnings",   ["earnings"," eps ","beats","beat estimates","misses","missed estimates","tops estimates","top estimates",
+                 "quarter","quarterly","fiscal","reports ","results","revenue","record revenue","net income","profit",
+                 "loss per share","earnings call","q1 2","q2 2","q3 2","q4 2","third-quarter","fourth-quarter",
+                 "first-quarter","second-quarter"]),
+ ("Guidance",   ["guidance","outlook","forecast","guide","raises fy","cuts fy","raises full","cuts full","expects","sees ",
+                 "projects","warns","lowers","raised its","cut its","growth forecast","reaffirms guidance","cuts estimate"]),
+ ("M&A",        ["acqui","merger","to buy","to purchase","buys ","buyout","takeover","to acquire","agrees to buy",
+                 "stake in","combine with","tender offer","deal to"]),
+ ("Analyst",    ["upgrade","downgrade","price target","raises target","cuts target","initiates","initiated","coverage",
+                 "overweight","underweight","outperform","buy rating","sell rating","hold rating","reiterates","reaffirms",
+                 "maintains","raised pt","cut pt"," pt ","analyst","estimates raised","estimates cut","raised to","cut to"]),
+ ("Regulatory", ["fda","approval","approved","approves","clearance","granted","lawsuit","settlement","investigat",
+                 "antitrust","probe"," fine ","penalty","recall","sec charges","subpoena","ruling","sues"]),
+ ("Capital",    ["buyback","repurchase","authoriz","dividend","stock split","offering","raises $","convertible",
+                 "debt offering","secondary","declares"]),
+ ("Product",    ["launch","unveil","introduc","announces","partnership","collaborat","contract","awarded","wins ","secures",
+                 "deal with","supply","design win","selected","expands","new chip","new product"]),
+ ("Management", ["ceo","cfo","president","chief executive","resign","steps down","appoints","named ceo","executive","board",
+                 "departure","interim","hires"]),
 ]
 
 def classify_news(title, summary=""):
@@ -1492,6 +1508,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
+_has_finnhub=bool(st.secrets.get("FINNHUB_API_KEY"))
 
 # ================= ACCOUNTS (lightweight) =================
 # Username + salted-hash password, stored in a JSON file. NOTE: on Streamlit Community Cloud the
@@ -1942,18 +1959,27 @@ if tickers and (run or any(syms)):
                     with st.expander(f"📋 See all {ts['n']} trades (entry → exit → actual %)"):
                         st.markdown(trade_log_html(tl),unsafe_allow_html=True)
 
-                    # spelled-out arithmetic for the FIRST trades (the ones that "look hugely profitable")
-                    first=tl[:8]; eqs=100.0; lines=[]
+                    # spelled-out arithmetic for the FIRST trades (clean table — $ in markdown breaks as LaTeX)
+                    first=tl[:8]; eqs=100.0; rws=[]
+                    TDx=f"padding:5px 10px;border-bottom:1px solid {GRID};font-family:'IBM Plex Mono',monospace;font-size:12px"
                     for j,tr in enumerate(first,1):
-                        eqs*=(1+tr["ret"])
-                        lines.append(f"{j}. bought **${tr['bp']:.2f}** → sold **${tr['sp']:.2f}** = "
-                                     f"**{tr['ret']*100:+.1f}%**  →  $100 is now **${eqs:.2f}**")
-                    biggest=max((t['ret'] for t in tl),default=0)*100
-                    st.markdown("**The first trades, spelled out with the real prices off your chart:**\n\n"
-                                + "\n\n".join(lines)
-                                + f"\n\n*(Reinvesting every time. The single biggest winner in all {ts['n']} trades "
-                                  f"was **{biggest:+.1f}%** — there is no 20%+ trade.)* "
-                                  "If any price here doesn't match the chart, that's the bug — tell me which line.")
+                        eqs*=(1+tr["ret"]); rc=GREEN if tr["ret"]>=0 else RED
+                        rws.append(f"<tr><td style='{TDx};color:{MUTE}'>{j}</td>"
+                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${tr['bp']:.2f}</td>"
+                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${tr['sp']:.2f}</td>"
+                                   f"<td style='{TDx};text-align:right;color:{rc};font-weight:600'>{tr['ret']*100:+.1f}%</td>"
+                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${eqs:.2f}</td></tr>")
+                    biggest=max((x['ret'] for x in tl),default=0)*100
+                    THx=f"padding:6px 10px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:right;border-bottom:1px solid {GRID}"
+                    head=(f"<tr><th style='{THx};text-align:left'>#</th><th style='{THx}'>Bought</th>"
+                          f"<th style='{THx}'>Sold</th><th style='{THx}'>Trade</th><th style='{THx}'>$100 →</th></tr>")
+                    st.markdown(f"**First {len(first)} trades — real prices off the chart, reinvesting each time:**")
+                    st.markdown(f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+                                f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+                                f"font-family:\"Chakra Petch\",sans-serif'>{head}{''.join(rws)}</table></div>",
+                                unsafe_allow_html=True)
+                    st.caption(f"Biggest single winner across all {ts['n']} trades: {biggest:+.1f}%. "
+                               "If a price here doesn't match the chart, tell me which line.")
 
                 # ---- MATERIAL catalysts vs the biggest moves (multi-year) ----
                 mrows=d.get("move_rows") or []
@@ -1970,9 +1996,11 @@ if tickers and (run or any(syms)):
                             st.markdown(keyword_stats_html(d["kw_stats"],fwd=5),unsafe_allow_html=True)
                             st.caption("Correlation, not causation — a small sample of past events. A catalyst that "
                                        "averaged positive historically can still disappoint next time.")
-                        if d["news_src"]!="Finnhub":
+                        if not _has_finnhub:
                             st.caption("⚠️ Using Yahoo's shallow recent feed. Add **FINNHUB_API_KEY** in Secrets for "
                                        "multi-year history — that's what makes this table reach back across the chart.")
+                        elif d["news_src"]!="Finnhub":
+                            st.caption("Finnhub returned no history for this symbol — showing Yahoo's recent feed instead.")
 
                 # ---- news: two-pane table + reaction summary ----
                 st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']}</span>",unsafe_allow_html=True)
@@ -1986,7 +2014,7 @@ if tickers and (run or any(syms)):
                     summary=news_reaction_summary(d["scores"],d["moves"])
                     if summary: st.markdown(f"**What tends to move {t}:** {summary}")
                     st.markdown(news_table_html(d["news"][:14],d["scores"][:14],d["moves"][:14]),unsafe_allow_html=True)
-                    if d["news_src"]=="Yahoo":
+                    if not _has_finnhub:
                         st.caption("Tip: add a FINNHUB_API_KEY in Secrets for dated, company-specific news "
                                    "(~1yr free) — that powers the chart markers and the reaction stats above.")
                 else:

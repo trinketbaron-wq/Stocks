@@ -572,6 +572,31 @@ def style_matrix(dd,cc):
                           f"text-align:center;border:1px solid {col}44")
     return dd.style.apply(lambda _:css,axis=None)
 
+def matrix_html(dd, cc):
+    """Dark HTML table (st.dataframe ignores injected CSS and follows the Streamlit theme,
+    which renders white without a dark config.toml — so we build the table ourselves)."""
+    th=(f"<th style='position:sticky;left:0;z-index:2;background:{PANEL};color:{MUTE};"
+        "text-align:left;padding:8px 11px;font-size:11px;letter-spacing:.07em'>INDICATOR</th>")
+    for c in dd.columns:
+        th+=(f"<th style='background:{PANEL};color:{TXT};text-align:center;padding:8px 11px;"
+             f"font-family:\"Chakra Petch\",sans-serif;font-size:14px;border-bottom:1px solid {GRID}'>{c}</th>")
+    body=""
+    for r in dd.index:
+        body+=(f"<tr><td style='position:sticky;left:0;z-index:1;background:{PANEL};color:{MUTE};"
+               f"padding:7px 11px;font-size:11px;white-space:nowrap;border-bottom:1px solid {GRID}'>{r}</td>")
+        for c in dd.columns:
+            col=cc.loc[r,c]; val=dd.loc[r,c]
+            if val is None or (isinstance(val,float) and pd.isna(val)): val=""
+            strong = r in ("VERDICT","STRENGTH")
+            body+=(f"<td style='background:{col}{'33' if strong else '1f'};color:{col};text-align:center;"
+                   f"padding:7px 11px;font-weight:{700 if strong else 500};font-size:12.5px;"
+                   f"border:1px solid {col}44'>{val}</td>")
+        body+="</tr>"
+    return (f"<div style='overflow-x:auto;border-radius:12px;border:1px solid {GRID}'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG};"
+            f"font-family:\"IBM Plex Mono\",monospace'>"
+            f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
+
 def overlay_indicator(name, data):
     fig=go.Figure()
     def add(col, fn):
@@ -981,21 +1006,19 @@ if tickers and (run or any(syms)):
             st.markdown(f"<div class='subnote'>Market fear · <b style='color:{vc}'>VIX {vix_now:.1f}</b> "
                         f"({'calm' if vix_now<17 else 'normal' if vix_now<22 else 'elevated' if vix_now<30 else 'high fear'}) "
                         f"— folded into every score.</div>",unsafe_allow_html=True)
-        # SCORE CARDS
-        cards="".join(score_card(t,d["strength"],d["state"],d["funda"]) for t,d in data.items())
-        st.markdown(f"<div class='cardwrap'>{cards}</div>",unsafe_allow_html=True)
-        # tap to see how each score is built (opens a pop-up)
-        st.caption("Tap a ticker for its score breakdown:")
-        bcols=st.columns(len(data))
-        for c,(t,d) in zip(bcols,data.items()):
-            if c.button(f"🔢 {t}",key=f"bd_{t}",use_container_width=True,
-                        help=f"How {t}'s strength score is built"):
-                show_breakdown(d,t)
+        # SCORE CARDS — each card gets its own breakdown button attached directly beneath it
+        ccols=st.columns(len(data))
+        for col,(t,d) in zip(ccols,data.items()):
+            with col:
+                st.markdown(score_card(t,d["strength"],d["state"],d["funda"]),unsafe_allow_html=True)
+                if st.button(f"🔢 How {int(d['strength'])}/100 is built",key=f"bd_{t}",
+                             use_container_width=True,help="Per-indicator score breakdown"):
+                    show_breakdown(d,t)
 
-        # MATRIX
+        # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
         st.markdown("#### Indicator matrix")
         dd,cc=matrix(data)
-        st.dataframe(style_matrix(dd,cc),use_container_width=True)
+        st.markdown(matrix_html(dd,cc),unsafe_allow_html=True)
         choice=pick_indicator()
         st.markdown(f"##### 🔍 {choice}")
         st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)

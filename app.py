@@ -1807,30 +1807,38 @@ if tickers and (run or any(syms)):
                        else f"🔢 How {int(d['strength'])}/100 is built")
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
-                # --- bespoke on/off (needs data) ---
-                st.toggle("α  Alphawire signal",key=f"besptog_{t}",disabled=not has,
-                    help=("Use this stock's own out-of-sample-tested indicator combination for its signal, "
-                          "instead of the generic composite." if has else "Load backtest data first to enable."))
-                # --- backtest-data lifecycle (below the card) ---
-                if not has:
-                    if st.button("⚡ Load backtest data",key=f"load_{t}",use_container_width=True,
-                                 help="Search indicator combinations on this stock & out-of-sample-test them, enabling the Alphawire signal."):
-                        with st.spinner(f"Searching {t} indicator combinations…"):
+                # --- α Alphawire signal control (prominent; needs backtest data) ---
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div style='font-family:Chakra Petch;font-weight:700;font-size:14px;color:{CYAN}'>"
+                        f"α Alphawire signal</div>"
+                        f"<div style='color:{MUTE};font-size:11px;margin:-2px 0 6px'>"
+                        f"{t}'s own out-of-sample-tested combination — overrides the generic composite.</div>",
+                        unsafe_allow_html=True)
+                    st.toggle("Use α Alphawire signal",key=f"besptog_{t}",
+                        help=("ON = drive this stock's signal, chart & backtest from its tuned combination."
+                              if has else "Load backtest data first (button below) to enable this."))
+                    if has:
+                        st.caption(f"📈 Backtest as of **{asof}** · {ores.get('n','?')} bars · {ores.get('n_tested','?')} combos tested")
+                        if st.button("↻ Update backtest data",key=f"upd_{t}",use_container_width=True,
+                                     help="Re-fetch latest prices and re-run the combination search."):
+                            try: get_hist.clear()
+                            except Exception: pass
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
                                 d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
-                        st.rerun()
-                else:
-                    st.caption(f"📈 Backtest as of **{asof}** · {ores.get('n','?')} bars · {ores.get('n_tested','?')} combos tested")
-                    if st.button("↻ Update backtest data",key=f"upd_{t}",use_container_width=True,
-                                 help="Re-fetch latest prices and re-run the combination search."):
-                        try: get_hist.clear()
-                        except Exception: pass
-                        st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
-                            d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
-                        st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
-                        st.session_state.pop(f"bespoke_choice_{t}",None)
-                        st.rerun()
+                            st.session_state.pop(f"bespoke_choice_{t}",None)
+                            st.rerun()
+                    else:
+                        if st.session_state.get(f"besptog_{t}",False):
+                            st.warning("⚠️ Load backtest data first to use the α Alphawire signal — tap the button below.")
+                        if st.button("⚡ Load backtest data",key=f"load_{t}",type="primary",use_container_width=True,
+                                     help="Search indicator combinations on this stock & out-of-sample-test them, unlocking the Alphawire signal."):
+                            with st.spinner(f"Searching {t} indicator combinations…"):
+                                st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
+                                    d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
+                                st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
+                            st.rerun()
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
         st.markdown("#### Indicator matrix")
@@ -1848,6 +1856,7 @@ if tickers and (run or any(syms)):
         components.html(f"""
         <script>
         const COLORS={_json.dumps(_tabcols)};
+        const GREEN='rgb(22, 199, 132)';
         function paint(){{
           try{{
             const doc=window.parent.document;
@@ -1859,19 +1868,21 @@ if tickers and (run or any(syms)):
             let active=0;
             tabs.forEach((b,i)=>{{ if(b.getAttribute('aria-selected')==='true') active=i; }});
             const c=COLORS[active]||'#16c784';
-            const wrap=list.parentElement;
-            const hl=wrap.querySelector('[data-baseweb="tab-highlight"]');
-            if(hl) hl.style.setProperty('background',c,'important');
-            const bd=wrap.querySelector('[data-baseweb="tab-border"]');
-            if(bd) bd.style.setProperty('background',c,'important');
-            list.style.setProperty('border-bottom-color',c,'important');
             tabs.forEach((b,i)=>{{
               const p=b.querySelector('p')||b;
               p.style.setProperty('color', i===active? c : '#c7d0db','important');
             }});
-            const heads=doc.querySelectorAll('h4,h3,h2');
-            heads.forEach(h=>{{ if((h.textContent||'').indexOf('Price & historical signals')>-1)
-                                  h.style.setProperty('color',c,'important'); }});
+            doc.querySelectorAll('h4,h3,h2').forEach(h=>{{
+              if((h.textContent||'').indexOf('Price & historical signals')>-1)
+                h.style.setProperty('color',c,'important'); }});
+            // recolor ANY green bar/border inside the tabs component (robust to markup)
+            const root=list.closest('[data-testid="stTabs"]')||list.parentElement;
+            root.querySelectorAll('*').forEach(el=>{{
+              const cs=getComputedStyle(el);
+              if(cs.backgroundColor===GREEN) el.style.setProperty('background-color',c,'important');
+              if(cs.borderBottomColor===GREEN) el.style.setProperty('border-bottom-color',c,'important');
+              if(cs.borderTopColor===GREEN) el.style.setProperty('border-top-color',c,'important');
+            }});
           }}catch(e){{}}
         }}
         clearInterval(window.__phsPaint);

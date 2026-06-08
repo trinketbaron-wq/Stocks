@@ -285,13 +285,66 @@ def fundamentals_grid(f):
     return f'<div class="fgrid">{inner}</div>'
 
 # ==========================================================================
+# MARKET MOVERS  (curated large-cap universes -> ranked by today's move)
+# Note: full-exchange (e.g. all of NYSE) movers aren't freely available, so we
+# use the major indices. Lists are curated large-caps; edit to taste.
+# ==========================================================================
+
+# ---- index universes for the movers picker (curated snapshots; misses fail gracefully) ----
+DOW30=["AAPL","AMGN","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","DOW","GS","HD","HON",
+ "IBM","JNJ","JPM","KO","MCD","MMM","MRK","MSFT","NKE","NVDA","PG","TRV","UNH","V","VZ","WMT"]
+SP100=["AAPL","ABBV","ABT","ACN","ADBE","AIG","AMD","AMGN","AMT","AMZN","AVGO","AXP","BA","BAC",
+ "BK","BKNG","BLK","BMY","BRK-B","C","CAT","CHTR","CL","CMCSA","COF","COP","COST","CRM","CSCO",
+ "CVS","CVX","DHR","DIS","DOW","DUK","EMR","F","FDX","GD","GE","GILD","GM","GOOG","GOOGL","GS",
+ "HD","HON","IBM","INTC","INTU","ISRG","JNJ","JPM","KHC","KO","LIN","LLY","LMT","LOW","MA","MCD",
+ "MDLZ","MDT","MET","META","MMM","MO","MRK","MS","MSFT","NEE","NFLX","NKE","NVDA","ORCL","PEP",
+ "PFE","PG","PM","PYPL","QCOM","RTX","SBUX","SCHW","SO","T","TGT","TMO","TMUS","TSLA","TXN","UNH",
+ "UNP","UPS","USB","V","VZ","WFC","WMT","XOM"]
+TSX60=["RY.TO","TD.TO","BNS.TO","BMO.TO","CM.TO","NA.TO","ENB.TO","TRP.TO","CNQ.TO","SU.TO","CVE.TO",
+ "IMO.TO","CNR.TO","CP.TO","SHOP.TO","ATD.TO","BCE.TO","T.TO","RCI-B.TO","MFC.TO","SLF.TO","GWO.TO",
+ "IFC.TO","TRI.TO","BN.TO","BAM.TO","WCN.TO","NTR.TO","AEM.TO","FNV.TO","WPM.TO","ABX.TO","CCO.TO",
+ "L.TO","MRU.TO","FTS.TO","EMA.TO","H.TO","POW.TO","PPL.TO","KEY.TO","QSR.TO","DOL.TO","CSU.TO",
+ "OTEX.TO","WSP.TO","STN.TO","MG.TO","TECK-B.TO","FM.TO","BIP-UN.TO","BEP-UN.TO"]
+NASDAQ100=["AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","AVGO","TSLA","COST","NFLX",
+ "TMUS","CSCO","PEP","AMD","ADBE","TXN","QCOM","INTU","AMGN","AMAT","ISRG","BKNG","HON",
+ "VRTX","ADP","REGN","MU","LRCX","PANW","ADI","KLAC","SBUX","GILD","MDLZ","SNPS","CDNS",
+ "MELI","CRWD","MAR","CTAS","ORLY","ABNB","MRVL","PYPL","FTNT","DASH","ASML","ADSK","NXPI",
+ "PCAR","ROP","MNST","CPRT","WDAY","AEP","PAYX","ROST","KDP","ODFL","FAST","CHTR","CCEP",
+ "FANG","EXC","VRSK","EA","KHC","CSGP","DDOG","XEL","GEHC","CTSH","TTWO","IDXX","ANSS",
+ "DXCM","BKR","ON","CSX","BIIB","GFS","MCHP","CDW","TTD","WBD","ZS","ARM","MDB","TEAM",
+ "SMCI","LULU","PDD","INTC","AZN"]
+UNIVERSES={"Dow Jones 30":DOW30,"S&P 100":SP100,"Nasdaq 100":NASDAQ100,"TSX 60":TSX60}
+
+@st.cache_data(ttl=600,show_spinner=False)
+def fetch_movers(universe_name):
+    """Rank an index's constituents by their latest 1-day % move. Returns DataFrame."""
+    tickers=UNIVERSES[universe_name]
+    try:
+        df=yf.download(tickers,period="5d",auto_adjust=True,progress=False,group_by="column",threads=True)
+    except Exception:
+        return None
+    if df is None or df.empty: return None
+    close=df["Close"] if "Close" in df.columns.get_level_values(0) else df
+    if isinstance(close,pd.Series): close=close.to_frame()
+    close=close.dropna(how="all")
+    if len(close)<2: return None
+    chg=(close.iloc[-1]/close.iloc[-2]-1)*100
+    out=pd.DataFrame({"ticker":chg.index,"chg":chg.values,"price":close.iloc[-1].values}).dropna()
+    out=out.reindex(out["chg"].abs().sort_values(ascending=False).index)  # biggest movers first
+    return out.reset_index(drop=True)
+
+# ==========================================================================
 # COMPONENTS / VIEWS
 # ==========================================================================
 def verdict_color(state): return {"BUY":GREEN,"SELL":RED}.get(state,AMBER)
 
 def score_card(tkr,strength,state,funda):
     col=verdict_color(state)
-    sub=f"MCAP {money(funda.get('market_cap'))} · P/E {fnum(funda.get('pe'))} · VOL {human(funda.get('volume') or funda.get('avg_vol'))}"
+    vc=funda.get("vol_chg")
+    voltxt="—" if vc is None else f"{'▲' if vc>=0 else '▼'} {abs(vc):.0f}%"
+    volcol=GREEN if (vc is not None and vc>=0) else (RED if vc is not None else MUTE)
+    sub=(f"MCAP {money(funda.get('market_cap'))} · P/E {fnum(funda.get('pe'))} · "
+         f"DIV {fpct(funda.get('div'))} · VOL <span style='color:{volcol}'>{voltxt}</span>")
     return f"""<div class="card">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
@@ -427,6 +480,42 @@ def price_signals(o, state_series, strength_series, tkr):
     fig.update_layout(xaxis_rangeslider_visible=False)
     return dark(fig,560)
 
+def render_movers():
+    st.caption("Biggest 1-day movers in the chosen index. Tap up to 5, then load them in.")
+    src=st.selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
+    with st.spinner(f"Scanning {src}…"):
+        mv=fetch_movers(src)
+    if mv is None or mv.empty:
+        st.error("Couldn't load movers right now (Yahoo may be rate-limiting). "
+                 "Try again shortly, or just type tickers manually.")
+        return
+    top=mv.head(40).copy()
+    show=top.copy()
+    show["chg"]=show["chg"].map(lambda x:f"{x:+.2f}%")
+    show["price"]=show["price"].map(lambda x:f"{x:,.2f}")
+    show.columns=["Ticker","% move","Price"]
+    csscol=pd.DataFrame("",index=show.index,columns=show.columns)
+    for i in show.index:
+        c=GREEN if top.loc[i,"chg"]>=0 else RED
+        csscol.loc[i,"% move"]=f"color:{c};font-weight:600"
+    st.dataframe(show.style.apply(lambda _:csscol,axis=None),use_container_width=True,height=300,hide_index=True)
+    picks=st.multiselect("Pick up to 5",top["ticker"].tolist(),max_selections=5,key="mv_pick")
+    if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
+        st.session_state["_load_syms"]=list(picks)[:5]
+        st.session_state.pop("mv_pick",None)
+        st.rerun()
+
+# real modal if available (Streamlit >=1.37), else inline fallback
+_open_movers = st.dialog("📈 Market Movers")(render_movers) if hasattr(st,"dialog") else render_movers
+
+def pick_indicator():
+    """Reliable tappable chips (falls back to a dropdown on older Streamlit)."""
+    if hasattr(st,"pills"):
+        ch=st.pills("Tap an indicator to expand its chart",INDICATORS,
+                    default="STRENGTH",selection_mode="single",key="indpick")
+        return ch or "STRENGTH"
+    return st.selectbox("Expand indicator",INDICATORS,index=INDICATORS.index("STRENGTH"),key="indpick")
+
 # ==========================================================================
 # UI
 # ==========================================================================
@@ -479,11 +568,20 @@ with st.sidebar:
     if not api_key: st.caption("ℹ️ Using built-in finance sentiment analyzer.")
 
 st.markdown("##### Enter up to 5 symbols")
+# movers picker hands tickers off via _load_syms; apply BEFORE inputs are created
+if "_load_syms" in st.session_state:
+    _picks=st.session_state.pop("_load_syms")
+    for i in range(5):
+        st.session_state[f"sym{i}"]=_picks[i] if i<len(_picks) else ""
+for i,dv in enumerate(["AAPL","MSFT","NVDA","",""]):
+    st.session_state.setdefault(f"sym{i}",dv)
 cols=st.columns(5)
-defaults=["AAPL","MSFT","NVDA","",""]
-syms=[cols[i].text_input(f"#{i+1}",value=defaults[i],key=f"sym{i}",label_visibility="collapsed",
+syms=[cols[i].text_input(f"#{i+1}",key=f"sym{i}",label_visibility="collapsed",
       placeholder=f"#{i+1}") for i in range(5)]
-run=st.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
+b1,b2=st.columns([2,1])
+run=b1.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
+if b2.button("🔎 Browse market movers",use_container_width=True):
+    _open_movers()
 
 tickers=[]
 for s in syms:
@@ -503,7 +601,12 @@ if tickers and (run or any(syms)):
             st.error(f"⚠️ No usable data for **{t}** — check the symbol."); prog.progress((k+1)/len(tickers)); continue
         o=enrich(hist)
         composite,strength,state,votes,max_w=signal_frame(o,vix_series,spy_series)
-        funda=get_fundamentals(t)
+        funda=dict(get_fundamentals(t))   # copy (cached dict) before adding price-derived stat
+        try:
+            va=o.VolAvg20.iloc[-1]
+            funda["vol_chg"]=(o.Volume.iloc[-1]/va-1)*100 if va and va==va else None
+        except Exception:
+            funda["vol_chg"]=None
         news=get_news(t)
         titles=[n["title"] for n in news if n["title"]]
         scores=(llm_sentiment(titles,api_key) if (use_ai and api_key) else [vader(x) for x in titles]) if titles else []
@@ -533,24 +636,11 @@ if tickers and (run or any(syms)):
         st.markdown(f"<div class='cardwrap'>{cards}</div>",unsafe_allow_html=True)
 
         # MATRIX
-        st.markdown("#### Indicator matrix  ·  tap a row to expand →")
+        st.markdown("#### Indicator matrix")
         dd,cc=matrix(data)
-        ev=st.dataframe(style_matrix(dd,cc),use_container_width=True,
-                        on_select="rerun",selection_mode="single-row",key="matrix")
-        sel_rows=[]
-        try: sel_rows=ev.selection.rows
-        except Exception: pass
-        from_table=INDICATORS[sel_rows[0]] if sel_rows else None
-        if from_table: st.session_state.indchoice=from_table
-        choice=st.session_state.get("indchoice","STRENGTH")
-
-        c1,c2=st.columns([3,1])
-        with c2:
-            choice=st.selectbox("Expand indicator",INDICATORS,
-                index=INDICATORS.index(choice),key="indselect")
-        st.session_state.indchoice=choice
-        with c1:
-            st.markdown(f"##### 🔍 {choice}")
+        st.dataframe(style_matrix(dd,cc),use_container_width=True)
+        choice=pick_indicator()
+        st.markdown(f"##### 🔍 {choice}")
         st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)
 
         # PER-STOCK PRICE + SIGNALS

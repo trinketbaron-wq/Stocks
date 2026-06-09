@@ -510,6 +510,33 @@ def get_company_news(t, period_years=1):
            "when":n.get("when",""),"dt":0,"summary":""} for n in yh]
     return norm,"Yahoo"
 
+def _prefetch_ticker(t, period, yrs, key):
+    """Raw, thread-safe fetch (no st.cache_data / no ScriptRunContext needed): price + fundamentals
+    + news. Mirrors the screener's parallel pattern; the caller caches results in session_state so
+    reruns and Randomize don't re-hit the network."""
+    try:
+        _df=yf.Ticker(t).history(period=period,auto_adjust=True)
+        h=_df[["Open","High","Low","Close","Volume"]] if (_df is not None and not _df.empty) else None
+    except Exception:
+        h=None
+    fu={}; ni=[]; nsrc="Yahoo"
+    if h is not None and len(h)>=60:
+        try: fu=dict(_fundamentals_raw(t))
+        except Exception: fu={}
+        items=None
+        if key:
+            try: items=_finnhub_range_raw(t, key, max(yrs,1), 120, 1500)
+            except Exception: items=None
+        if items:
+            ni,nsrc=items,"Finnhub"
+        else:
+            try: _yh=[parse_news(x) for x in (yf.Ticker(t).news or [])[:8]]
+            except Exception: _yh=[]
+            ni=[{"title":n.get("title",""),"source":n.get("publisher",""),"url":n.get("url",""),
+                 "when":n.get("when",""),"dt":0,"summary":""} for n in _yh]
+            nsrc="Yahoo"
+    return h,fu,ni,nsrc
+
 def _naive_idx(o):
     idx=pd.to_datetime(o.index)
     return idx.tz_localize(None) if idx.tz is not None else idx
@@ -567,8 +594,7 @@ def material_news(items):
             it=dict(it); it["category"]=cat; out.append(it)
     return out
 
-@st.cache_data(ttl=3600,show_spinner=False)
-def _finnhub_range_cached(symbol, key, years, per_call_days, cap):
+def _finnhub_range_raw(symbol, key, years, per_call_days, cap):
     """Paginate Finnhub company-news in ~quarterly windows back `years`. The cache key INCLUDES
     the API key, so the instant a valid key appears this re-fetches instead of serving a stale
     empty result. Free tier only serves ~1yr, so we stop after consecutive empty windows."""
@@ -600,6 +626,7 @@ def _finnhub_range_cached(symbol, key, years, per_call_days, cap):
         _time.sleep(0.2)                     # gentle on the 60/min free-tier limit
     items=sorted(out.values(),key=lambda x:x["dt"],reverse=True)
     return items or None
+_finnhub_range_cached=st.cache_data(ttl=3600,show_spinner=False)(_finnhub_range_raw)
 
 def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
     """Deep, dated company news from Finnhub. Returns None when no key is set (and caches nothing
@@ -803,8 +830,7 @@ def get_spy(period):
         s=yf.Ticker("SPY").history(period=period,auto_adjust=True)
         return s["Close"] if not s.empty else None
     except Exception: return None
-@st.cache_data(ttl=3600,show_spinner=False)
-def get_fundamentals(t):
+def _fundamentals_raw(t):
     info={}; tk=None
     try: tk=yf.Ticker(t)
     except Exception: tk=None
@@ -837,6 +863,7 @@ def get_fundamentals(t):
         avg_vol=g("averageVolume","averageDailyVolume10Day")
                 or fi.get("ten_day_average_volume") or fi.get("three_month_average_volume"),
         volume=g("volume","regularMarketVolume") or fi.get("last_volume"))
+get_fundamentals=st.cache_data(ttl=3600,show_spinner=False)(_fundamentals_raw)
 
 def _extract_fin(stmt):
     """Pull revenue + net income series out of a yfinance income statement frame."""
@@ -917,7 +944,44 @@ NASDAQ100=["AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","AVGO","TSLA","COST
  "FANG","EXC","VRSK","EA","KHC","CSGP","DDOG","XEL","GEHC","CTSH","TTWO","IDXX","ANSS",
  "DXCM","BKR","ON","CSX","BIIB","GFS","MCHP","CDW","TTD","WBD","ZS","ARM","MDB","TEAM",
  "SMCI","LULU","PDD","INTC","AZN"]
-UNIVERSES={"Dow Jones 30":DOW30,"S&P 100":SP100,"Nasdaq 100":NASDAQ100,"TSX 60":TSX60}
+# ---- broader sleeves: full S&P 500 and a wide Nasdaq list (built from the curated lists + extras,
+# de-duplicated). Larger universes take longer to scan; the scan result is cached for 15 minutes. ----
+_SP500_EXTRA=[
+ "AON","AJG","MMC","WTW","PGR","ALL","AIG","MET","PRU","AFL","ACGL","CB","HIG","CINF","L","TRV",
+ "SPGI","MCO","MSCI","ICE","CME","NDAQ","CBOE","FDS","MKTX","BRO","GL","WRB","RJF","NTRS","STT",
+ "TROW","BK","PNC","TFC","USB","COF","FITB","HBAN","RF","KEY","CFG","MTB","SYF","DFS","ALLY","FIS",
+ "FI","GPN","JKHY","BR","NOW","APH","MSI","TEL","TYL","PTC","ANSS","GEN","HPQ","HPE","DELL","WDC",
+ "STX","NTAP","JNPR","FFIV","AKAM","CDW","IT","GLW","KEYS","TER","MPWR","SWKS","QRVO","ON","MCHP",
+ "NXPI","FSLR","ENPH","JBL","TDY","GRMN","CTSH","EPAM","GDDY","VRSN","FICO","ANET","CHTR","WBD",
+ "PARA","FOXA","FOX","OMC","IPG","TTWO","EA","LYV","MTCH","NWSA","NWS","TJX","ROST","MAR","HLT",
+ "LVS","WYNN","MGM","CMG","YUM","DRI","DPZ","ORLY","AZO","GPC","LKQ","APTV","BWA","GM","F","LEN",
+ "DHI","PHM","NVR","MHK","WHR","TPR","RL","TSCO","ULTA","BBY","DG","DLTR","EBAY","EXPE","ABNB","CCL",
+ "RCL","NCLH","POOL","KMX","HAS","DECK","CL","KMB","GIS","K","KHC","HSY","STZ","MO","PM","TGT","KR",
+ "SYY","ADM","TSN","HRL","MKC","CHD","CLX","CAG","CPB","SJM","TAP","BF-B","EL","KDP","KVUE","WBA",
+ "COP","SLB","EOG","MPC","PSX","VLO","OXY","WMB","KMI","OKE","HES","DVN","FANG","HAL","BKR","TRGP",
+ "CTRA","APA","MRO","EQT","ABT","DHR","BMY","TMO","CVS","CI","ELV","HUM","CNC","MCK","COR","CAH",
+ "BDX","SYK","BSX","MDT","EW","ZBH","ISRG","VRTX","REGN","BIIB","MRNA","IDXX","IQV","A","DXCM","RMD",
+ "HOLX","ZTS","WST","WAT","MTD","STE","BAX","BIO","TECH","CRL","DGX","LH","PODD","ALGN","VTRS","HSIC",
+ "XRAY","UHS","DVA","INCY","UNP","UPS","RTX","LMT","NOC","GD","DE","EMR","ETN","ITW","PH","CSX","NSC",
+ "FDX","ROK","CMI","PCAR","CARR","OTIS","GEV","IR","DOV","AME","XYL","FTV","ROL","PWR","AOS","SWK",
+ "SNA","WAB","GWW","FAST","PAYX","ADP","RSG","WM","URI","JCI","TT","TDG","HWM","AXON","LHX","LDOS",
+ "TXT","HII","MAS","NDSN","PNR","ALLE","J","EFX","VRSK","CTAS","ODFL","EXPD","CHRW","GNRC","LIN","APD",
+ "SHW","ECL","FCX","NEM","NUE","DD","PPG","VMC","MLM","ALB","CTVA","IFF","LYB","CF","MOS","FMC","PKG",
+ "IP","AMCR","AVY","BALL","CE","EMN","SEE","STLD","PLD","AMT","EQIX","CCI","PSA","O","SPG","WELL","VICI",
+ "DLR","SBAC","EXR","AVB","EQR","INVH","ARE","VTR","MAA","ESS","UDR","HST","KIM","REG","FRT","BXP","CPT",
+ "DOC","IRM","CBRE","WY","NEE","DUK","SO","D","AEP","EXC","SRE","XEL","PCG","ED","WEC","ES","PEG","AEE",
+ "FE","ETR","DTE","CMS","CNP","ATO","LNT","NI","EVRG","AES","PNW","NRG",
+ "VST","CEG","KKR","BX","APO","UBER","PLTR","DAL","LUV","SW","TPL","SOLV"]
+SP500=sorted(set(SP100)|set(_SP500_EXTRA))
+_NASDAQ_EXTRA=[
+ "COIN","MSTR","HOOD","RBLX","DKNG","ROKU","SOFI","AFRM","UPST","RIVN","LCID","SIRI","ILMN","DOCU",
+ "ZM","OKTA","ALNY","BMRN","EXAS","NTNX","CFLT","GTLB","PATH","DUOL","BILL","LBRDK","FOXA","FOX",
+ "FFIV","CHKP","ENTG","TRMB","JD","BIDU","NTES","TCOM","LI","XPEV","BGNE","ZBRA","AKAM","WDC","NTAP",
+ "SWKS","QRVO","STX","LOGI","ETSY","WIX","HALO","TXRH","WING","FOXF","CZR","SBAC","JBLU","HAS","WBA",
+ "VRSN","GEN","GDDY","TTWO","EA","CTSH","ANSS","ON","MCHP","NXPI","ENPH","FSLR"]
+NASDAQ_BROAD=sorted(set(NASDAQ100)|set(_NASDAQ_EXTRA))
+UNIVERSES={"Dow Jones":DOW30,"S&P 100":SP100,"S&P 500":SP500,
+           "Nasdaq 100":NASDAQ100,"Nasdaq (broad)":NASDAQ_BROAD,"TSX 60":TSX60}
 
 # recognizable, liquid large-caps used to seed the 5 boxes with a fresh random set on each open
 DEFAULT_POOL=["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","NFLX","AMD","INTC","QCOM",
@@ -1010,7 +1074,8 @@ def _scan_universe_build(universe_name, period):
     rows=[]
     try:
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        _w=min(16,max(8,len(tickers)//8))   # more workers for the big sleeves (S&P 500, broad Nasdaq)
+        with ThreadPoolExecutor(max_workers=_w) as ex:
             for r in ex.map(_one, tickers):
                 if r: rows.append(r)
     except Exception:                                                  # fallback if threads misbehave
@@ -2119,38 +2184,30 @@ if tickers and (run or any(syms)):
     vix_now=float(vix_series.iloc[-1]) if vix_series is not None and len(vix_series) else None
     data={}
     yrs=PERIOD_YEARS.get(period,2)
+    _fkey=_finnhub_key()
+    import time as _tmod; _now=_tmod.time()
+    # ---- parallel RAW prefetch, cached in session_state so reruns / Randomize don't re-hit the network ----
+    _store=st.session_state.setdefault("_datacache",{})
+    _need=[t for t in tickers if (lambda e:(not e) or (_now-e[0]>900))(_store.get((t,period)))]
     prog=st.progress(0.0,text="Loading market data…")
-    # ---- parallel prefetch: price + fundamentals + news for ALL tickers at once (cuts open time) ----
-    def _prefetch_one(t):
-        try: h=get_hist(t,period)
-        except Exception: h=None
-        fu={}; ni=[]; nsrc="Yahoo"
-        if h is not None and len(h)>=60:
-            try: fu=dict(get_fundamentals(t))
-            except Exception: fu={}
-            try: ni,nsrc=get_company_news(t,period_years=yrs)
-            except Exception: ni,nsrc=[],"Yahoo"
-        return t,h,fu,ni,nsrc
-    _pf={}; _addctx=_ctx=None
-    try:
-        from streamlit.runtime.scriptrunner import add_script_run_ctx as _addctx, get_script_run_ctx as _getctx
-        _ctx=_getctx()
-    except Exception:
-        _addctx=_ctx=None
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        _mw=min(6,max(1,len(tickers)))
-        _ex=(ThreadPoolExecutor(max_workers=_mw,initializer=_addctx,initargs=(_ctx,))
-             if (_addctx and _ctx) else ThreadPoolExecutor(max_workers=_mw))
-        with _ex:
-            _futs=[_ex.submit(_prefetch_one,t) for t in tickers]
-            for _i,_fut in enumerate(as_completed(_futs),1):
-                _r=_fut.result(); _pf[_r[0]]=(_r[1],_r[2],_r[3],_r[4])
-                prog.progress(_i/len(tickers),text="Loading market data…")
-    except Exception:
-        for _i,t in enumerate(tickers,1):
-            _r=_prefetch_one(t); _pf[_r[0]]=(_r[1],_r[2],_r[3],_r[4])
-            prog.progress(_i/len(tickers),text="Loading market data…")
+    if _need:
+        def _work(t): return t,_prefetch_ticker(t,period,yrs,_fkey)
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=min(8,max(1,len(_need)))) as _ex:
+                _futs=[_ex.submit(_work,t) for t in _need]
+                for _i,_fut in enumerate(as_completed(_futs),1):
+                    _tt,_res=_fut.result(); _store[(_tt,period)]=(_now,)+_res
+                    prog.progress(_i/len(_need),text=f"Loading market data… {_i}/{len(_need)}")
+        except Exception:
+            for _i,t in enumerate(_need,1):
+                _store[(t,period)]=(_now,)+_prefetch_ticker(t,period,yrs,_fkey)
+                prog.progress(_i/len(_need),text=f"Loading market data… {_i}/{len(_need)}")
+    else:
+        prog.progress(1.0,text="Loading market data…")
+    if len(_store)>60:                                  # keep session memory bounded
+        for _k in sorted(_store,key=lambda kk:_store[kk][0])[:len(_store)-60]: _store.pop(_k,None)
+    _pf={t:(lambda e:e[1:] if e else (None,{},[],"Yahoo"))(_store.get((t,period))) for t in tickers}
     for k,t in enumerate(tickers):
         hist,funda0,news_items,news_src=_pf.get(t,(None,{},[],"Yahoo"))
         if hist is None or len(hist)<60:
@@ -2286,6 +2343,8 @@ if tickers and (run or any(syms)):
                                      help="Re-fetch latest prices and re-run the combination search."):
                             try: get_hist.clear()
                             except Exception: pass
+                            _dc=st.session_state.get("_datacache",{})
+                            for _k in [k for k in list(_dc) if k[0]==t]: _dc.pop(_k,None)
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
                                 d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]

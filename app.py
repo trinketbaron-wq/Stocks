@@ -919,6 +919,12 @@ NASDAQ100=["AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","AVGO","TSLA","COST
  "SMCI","LULU","PDD","INTC","AZN"]
 UNIVERSES={"Dow Jones 30":DOW30,"S&P 100":SP100,"Nasdaq 100":NASDAQ100,"TSX 60":TSX60}
 
+# recognizable, liquid large-caps used to seed the 5 boxes with a fresh random set on each open
+DEFAULT_POOL=["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","NFLX","AMD","INTC","QCOM",
+ "ORCL","CRM","ADBE","CSCO","IBM","TXN","MU","PYPL","DIS","NKE","SBUX","MCD","KO","PEP","COST",
+ "WMT","TGT","HD","LOW","JPM","BAC","GS","MS","V","MA","AXP","UNH","JNJ","PFE","LLY","XOM","CVX",
+ "BA","CAT","GE","F","GM","T","VZ","UBER","ABNB","PLTR","SHOP","COIN","SQ","SNOW","DELL"]
+
 @st.cache_data(ttl=600,show_spinner=False)
 def fetch_movers(universe_name):
     """Rank an index's constituents by their latest 1-day % move. Returns DataFrame."""
@@ -1802,12 +1808,32 @@ def render_movers():
             picks=st.multiselect("Pick up to 5",opts,max_selections=5,key="mv_pills")
 
     if len(picks)>5:
-        st.warning("Max 5 — using your first five."); picks=picks[:5]
+        picks=picks[:5]
+
+    # additive: show what's already loaded and how many slots are free, then APPEND (don't overwrite)
+    cur=[(st.session_state.get(f"sym{i}","") or "").strip().upper() for i in range(5)]
+    cur=[s for s in cur if s]
+    free=5-len(cur)
+    new_picks=[p for p in picks if p not in cur][:max(free,0)]
+    dropped=[p for p in picks if p not in cur][max(free,0):]
+    if cur:
+        st.caption(f"Already loaded: **{', '.join(cur)}**  ·  **{free}** slot{'s' if free!=1 else ''} free")
     st.caption(f"**Selected:** {', '.join(picks) if picks else 'tap rows above'}")
-    if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
-        st.session_state["_load_syms"]=list(picks)[:5]
+    if dropped:
+        st.warning(f"Only {free} slot{'s' if free!=1 else ''} free — will add {', '.join(new_picks) or 'none'}; "
+                   f"no room for {', '.join(dropped)}. Clear a slot to add more.")
+    b_add,b_clr=st.columns([2,1])
+    add_lbl=("➕ Add to AlphaWire" if cur else "⚡ Load into AlphaWire")
+    if b_add.button(add_lbl,type="primary",disabled=not new_picks,use_container_width=True):
+        st.session_state["_load_syms"]=list(new_picks)
+        st.session_state["_load_mode"]="append"          # append into free slots, keep existing
         st.session_state.pop("mv_pills",None); st.session_state.pop("mv_table",None)
-        st.rerun()   # closing the dialog here is intended — returns to the deck with picks loaded
+        st.rerun()   # closing the dialog here is intended — returns to the deck with picks added
+    if b_clr.button("🗑 Clear slots",use_container_width=True,disabled=not cur,
+                    help="Empty all 5 ticker boxes so you can start a fresh selection"):
+        st.session_state["_load_syms"]=[]; st.session_state["_load_mode"]="replace"
+        st.session_state.pop("mv_pills",None); st.session_state.pop("mv_table",None)
+        st.rerun()
 
 # real modal if available (Streamlit >=1.37), else inline fallback
 _open_movers = st.dialog("🔎 AlphaWire Screener")(render_movers) if hasattr(st,"dialog") else render_movers
@@ -2048,22 +2074,37 @@ with st.sidebar:
                     st.error(f"Request failed ({type(_e).__name__}) — the host may be blocking outbound calls.")
 
 st.markdown("##### Enter up to 5 symbols")
-# movers picker hands tickers off via _load_syms; apply BEFORE inputs are created
+def _merge_slots(cur, picks, mode):
+    """Values for the 5 ticker boxes when loading picks. mode 'append' keeps already-filled boxes
+    and drops new picks into the free ones; 'replace' starts fresh. Deduped (case-insensitive), cap 5."""
+    out=[(s or "").strip().upper() for s in cur]
+    out=[s for s in out if s] if mode=="append" else []
+    for p in picks:
+        p=(p or "").strip().upper()
+        if p and p not in out and len(out)<5: out.append(p)
+    return (out+[""]*5)[:5]
+# movers picker / login hand tickers off via _load_syms; apply BEFORE inputs are created
 if "_load_syms" in st.session_state:
-    _picks=st.session_state.pop("_load_syms")
-    for i in range(5):
-        st.session_state[f"sym{i}"]=_picks[i] if i<len(_picks) else ""
-for i,dv in enumerate(["AAPL","MSFT","NVDA","",""]):
-    st.session_state.setdefault(f"sym{i}",dv)
+    _vals=_merge_slots([st.session_state.get(f"sym{i}","") for i in range(5)],
+                       st.session_state.pop("_load_syms"),
+                       st.session_state.pop("_load_mode","replace"))
+    for i in range(5): st.session_state[f"sym{i}"]=_vals[i]
+if not any(f"sym{i}" in st.session_state for i in range(5)):   # fresh session -> 5 random names (a lively default)
+    import random as _rnd
+    for i,p in enumerate(_rnd.sample(DEFAULT_POOL,5)): st.session_state[f"sym{i}"]=p
 cols=st.columns(5)
 syms=[cols[i].text_input(f"#{i+1}",key=f"sym{i}",label_visibility="collapsed",
       placeholder=f"#{i+1}") for i in range(5)]
-b1,b2=st.columns([2,1])
+b1,b2,b3=st.columns([5,4,3])
 run=b1.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
 if b2.button("🔎 Screener: find & add stocks",use_container_width=True):
     _open_movers()
-st.caption("The screener scores a whole index with AlphaRank, then filters by RSI, trend, breakouts, volume and more "
-           "— tap names there to fill the boxes above, then Run to score them in full.")
+if b3.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of 5 names into the boxes"):
+    import random as _rnd
+    st.session_state["_load_syms"]=_rnd.sample(DEFAULT_POOL,5); st.session_state["_load_mode"]="replace"
+    st.rerun()
+st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names "
+           "(clear a slot or randomize if all five are full).")
 
 tickers=[]
 for s in syms:

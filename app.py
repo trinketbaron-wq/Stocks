@@ -169,19 +169,9 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
   opacity:1 !important; visibility:visible !important;
 }
 [data-testid="stSidebarCollapseButton"]{ background:rgba(255,255,255,0.08) !important; border-radius:8px !important; }
-/* ---- OPEN-SETTINGS control (sidebar collapsed): DARK glass pill on the black header, with a label ---- */
-[data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
-  background:rgba(18,26,38,0.92) !important; border-radius:10px !important; padding:6px 13px 6px 10px !important;
-  display:flex !important; align-items:center !important; gap:8px !important; width:auto !important;
-  box-shadow:0 4px 16px rgba(0,0,0,0.5) !important; border:1px solid rgba(62,193,211,0.45) !important;
-}
-[data-testid="collapsedControl"] *, [data-testid="stSidebarCollapsedControl"] *, [data-testid="stExpandSidebarButton"] *{
-  color:#e6edf3 !important; fill:#3ec1d3 !important; opacity:1 !important; visibility:visible !important;
-}
-[data-testid="collapsedControl"]::after, [data-testid="stSidebarCollapsedControl"]::after, [data-testid="stExpandSidebarButton"]::after{
-  content:"⚙ Analysis settings"; color:#e6edf3; font-family:'Chakra Petch',sans-serif;
-  font-weight:700; font-size:13px; letter-spacing:.02em; white-space:nowrap;
-}
+/* ---- settings now live in an expander under the login, so hide the sidebar + its open pill entirely ---- */
+[data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{ display:none !important; }
+[data-testid="stSidebar"]{ display:none !important; }
 /* ---- kill the white Streamlit header strip + colored decoration; pull the page content up ---- */
 [data-testid="stHeader"]{ background:transparent !important; }
 [data-testid="stDecoration"]{ display:none !important; }
@@ -2127,29 +2117,30 @@ with _top_slot:
         if _ar[2].button("Log out",use_container_width=True,key="acct_logout"):
             st.session_state.pop("user",None); st.rerun()
     else:
-        with st.expander("👤 Log in / Register — save your watchlist & Alphawire rules"):
-            _au=st.text_input("Username",key="auth_u")
-            _ap=st.text_input("Password",type="password",key="auth_p")
-            _acc=st.columns(2)
-            if _acc[0].button("Log in",use_container_width=True,key="auth_login"):
-                if verify_user(_au,_ap):
-                    u=_au.strip().lower(); st.session_state["user"]=u
-                    dat=get_user_data(u)
-                    if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
-                    if dat.get("screens"): st.session_state["screens_saved"]=dat["screens"]
-                    for tkr,choice in (dat.get("bespoke") or {}).items():
-                        st.session_state[f"bespoke_choice_{tkr}"]=choice; st.session_state[f"besptog_{tkr}"]=True
-                    st.rerun()
-                else:
-                    st.error("Wrong username or password.")
-            if _acc[1].button("Register",use_container_width=True,key="auth_reg"):
-                ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
-                if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
-            st.caption("Optional. Accounts persist while the app stays awake; on the free tier they reset on reboot.")
+        _lc=st.columns(2)
+        _au=_lc[0].text_input("Username",key="auth_u",label_visibility="collapsed",placeholder="Username")
+        _ap=_lc[1].text_input("Password",type="password",key="auth_p",label_visibility="collapsed",placeholder="Password")
+        _bc=st.columns(2)
+        _login_clk=_bc[0].button("Log in",use_container_width=True,key="auth_login")
+        _reg_clk=_bc[1].button("Register",use_container_width=True,key="auth_reg")
+        st.caption("Optional — saves your watchlist & Alphawire rules. Resets on reboot (free tier).")
+        if _login_clk:
+            if verify_user(_au,_ap):
+                u=_au.strip().lower(); st.session_state["user"]=u
+                dat=get_user_data(u)
+                if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
+                if dat.get("screens"): st.session_state["screens_saved"]=dat["screens"]
+                for tkr,choice in (dat.get("bespoke") or {}).items():
+                    st.session_state[f"bespoke_choice_{tkr}"]=choice; st.session_state[f"besptog_{tkr}"]=True
+                st.rerun()
+            else:
+                st.error("Wrong username or password.")
+        if _reg_clk:
+            ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
+            if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
+    _settings_exp=st.expander("⚙ Analysis settings",expanded=False)   # settings live HERE, right after login
 
-with st.sidebar:
-    st.header("⚙ Settings")
-    st.caption("Log in at the top of the page to save your watchlist & rules.")
+with _settings_exp:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 

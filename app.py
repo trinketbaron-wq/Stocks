@@ -525,7 +525,7 @@ def _prefetch_ticker(t, period, yrs, key):
         except Exception: fu={}
         items=None
         if key:
-            try: items=_finnhub_range_raw(t, key, max(yrs,1), 120, 600)
+            try: items=_finnhub_range_raw(t, key, max(yrs,1), 360, 600)
             except Exception: items=None
         if items:
             ni,nsrc=items,"Finnhub"
@@ -866,22 +866,13 @@ def _fundamentals_raw(t):
 get_fundamentals=st.cache_data(ttl=3600,show_spinner=False)(_fundamentals_raw)
 
 def _fundamentals_fast(t, key):
-    """Fast fundamentals: yfinance fast_info (one quick call) + Finnhub metric/profile2 — avoids the
-    SLOW, Yahoo-rate-limited .info call that was choking the opening fetch. Falls back to the .info
-    path when there's no Finnhub key or Finnhub returns nothing."""
+    """Fast fundamentals from Finnhub (metric + profile2) ONLY — no yfinance .info AND no fast_info,
+    so the only Yahoo call per stock is the price history (which parallelizes fine). Volume / 52-week
+    range get backfilled from the price data in the scoring loop. Falls back to the .info path when
+    there's no key or Finnhub returns nothing."""
     if not key:
         return _fundamentals_raw(t)
     import requests
-    fi={}
-    try:
-        fobj=yf.Ticker(t).fast_info
-        for kk in ["market_cap","year_high","year_low","last_volume",
-                   "ten_day_average_volume","three_month_average_volume"]:
-            try: fi[kk]=fobj[kk]
-            except Exception:
-                try: fi[kk]=getattr(fobj,kk)
-                except Exception: pass
-    except Exception: pass
     m={}; prof={}
     try:
         r=requests.get("https://finnhub.io/api/v1/stock/metric",
@@ -905,16 +896,14 @@ def _fundamentals_fast(t, key):
     _capm=prof.get("marketCapitalization") or mm("marketCapitalization")  # Finnhub: MILLIONS
     return dict(
         name=prof.get("name") or t, sector=None, industry=prof.get("finnhubIndustry"),
-        market_cap=(float(_capm)*1e6 if _capm not in (None,"",0) else fi.get("market_cap")),
+        market_cap=(float(_capm)*1e6 if _capm not in (None,"",0) else None),
         pe=mm("peTTM","peBasicExclExtraTTM","peExclExtraTTM"), fpe=None,
         eps=mm("epsTTM","epsInclExtraItemsTTM","epsBasicExclExtraItemsTTM"),
         div=(float(_div)/100.0 if _div is not None else None),       # -> fraction (fpct re-multiplies)
         beta=mm("beta"), pb=mm("pbAnnual","pbQuarterly"),
         margin=(float(_mar)/100.0 if _mar is not None else None),    # -> fraction
-        hi52=mm("52WeekHigh") or fi.get("year_high"),
-        lo52=mm("52WeekLow") or fi.get("year_low"),
-        avg_vol=fi.get("ten_day_average_volume") or fi.get("three_month_average_volume"),
-        volume=fi.get("last_volume"))
+        hi52=mm("52WeekHigh"), lo52=mm("52WeekLow"),
+        avg_vol=None, volume=None)                                   # filled from price in the scoring loop
 
 def _extract_fin(stmt):
     """Pull revenue + net income series out of a yfinance income statement frame."""
@@ -2115,9 +2104,9 @@ with st.sidebar:
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 
     st.markdown("**αAlphawire search**")
-    split_default=st.slider("Train on first __% of history",50,85,70,5,
+    split_default=st.slider("Train on first __% of history",50,90,85,5,
         help="Percent of history (NOT days) used to TUNE each combination. The remaining % is held out as the "
-             "out-of-sample test. 70 = tune on the older 70%, test on the most recent 30%.")
+             "out-of-sample test. 85 = tune on the older 85%, test on the most recent 15%.")
     st.caption(f"Tuning on the oldest **{split_default}%**, testing on the newest **{100-split_default}%** (unseen).")
     awn_halflife=st.slider("AWN news half-life (days)",2,20,5,1,
         help="How fast the AlphaWire News signal decays after a catalyst. 5 = a catalyst's effect roughly halves "

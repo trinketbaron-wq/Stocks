@@ -86,8 +86,8 @@ h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.
 .card .deck-tkr {{ font-size:22px; font-weight:700; }}
 .card .verdict {{ float:right; font-family:'Chakra Petch'; font-weight:700; font-size:13px;
     padding:3px 10px; border-radius:999px; letter-spacing:.08em; }}
-.card .num {{ font-size:40px; font-weight:600; line-height:1.1; margin-top:6px; }}
-.card .lab {{ color:{MUTE}; font-size:11px; text-transform:uppercase; letter-spacing:.12em; }}
+.card .num {{ font-size:40px; font-weight:600; line-height:1.05; margin-top:0; }}
+.card .lab {{ color:{MUTE}; font-size:11px; text-transform:uppercase; letter-spacing:.12em; line-height:1.15; margin-bottom:1px; }}
 .gauge {{ height:9px; border-radius:6px; margin-top:12px; position:relative;
     background:linear-gradient(90deg,{RED} 0%,{AMBER} 50%,{GREEN} 100%); opacity:.85; }}
 .gauge .tick {{ position:absolute; top:-4px; width:3px; height:17px; border-radius:2px;
@@ -1079,7 +1079,7 @@ SCREEN_PRESETS={
 # ==========================================================================
 def verdict_color(state): return {"BUY":GREEN,"SELL":RED}.get(state,AMBER)
 
-def score_card(tkr,strength,state,funda,bespoke=None):
+def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
     vc=funda.get("vol_chg")
     voltxt="—" if vc is None else f"{'▲' if vc>=0 else '▼'} {abs(vc):.0f}%"
     volcol=GREEN if (vc is not None and vc>=0) else (RED if vc is not None else MUTE)
@@ -1095,6 +1095,7 @@ def score_card(tkr,strength,state,funda,bespoke=None):
         priceline=(f"<div class='cardsub' style='font-family:\"IBM Plex Mono\",monospace;"
                    f"font-size:18px;color:{TXT};margin:2px 0 4px'>${pr:,.2f}{chgtxt}</div>")
     col=verdict_color(state)
+    _top=f"border-top:5px solid {accent};" if accent else ""
     if bespoke:
         poscol=GREEN if bespoke["long"] else AMBER
         posbadge="LONG ▲" if bespoke["long"] else "CASH ■"
@@ -1102,7 +1103,7 @@ def score_card(tkr,strength,state,funda,bespoke=None):
         oocol=GREEN if bespoke["beat"] else RED
         in_tag=("beats B&amp;H" if bespoke["in_beat"] else "ties/▼ B&amp;H")
         oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
-        return f"""<div class="card" style="border-color:{AMBER}66">
+        return f"""<div class="card" style="{_top}border-color:{AMBER}66">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
@@ -1116,7 +1117,7 @@ def score_card(tkr,strength,state,funda,bespoke=None):
       <div style="font-family:'Chakra Petch',sans-serif;font-size:23px;font-weight:700;color:{incol};margin:3px 0 1px">{bespoke['in_ret']:+.0f}%<span style="font-size:12px;color:{MUTE};font-weight:400"> historical vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
       <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
     </div>"""
-    return f"""<div class="card">
+    return f"""<div class="card" style="{_top}">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
@@ -2193,7 +2194,7 @@ if tickers and (run or any(syms)):
                         f"— folded into every score.</div>",unsafe_allow_html=True)
         # SCORE CARDS — each card carries: backtest-data lifecycle, a bespoke toggle, breakdown button
         ccols=st.columns(len(data))
-        for col,(t,d) in zip(ccols,data.items()):
+        for _ci,(col,(t,d)) in enumerate(zip(ccols,data.items())):
             with col:
                 ores=st.session_state.get(f"optres_{t}"); has=bool(ores and ores.get("rows"))
                 asof=st.session_state.get(f"optres_asof_{t}")
@@ -2215,7 +2216,8 @@ if tickers and (run or any(syms)):
                 else:
                     st.session_state.pop(f"bespoke_{t}",None)
                 # --- card first ---
-                st.markdown(score_card(t,d["strength"],d["state"],d["funda"],bespoke=bespoke_disp),
+                st.markdown(score_card(t,d["strength"],d["state"],d["funda"],bespoke=bespoke_disp,
+                                       accent=TAB_PALETTE[_ci%len(TAB_PALETTE)]),
                             unsafe_allow_html=True)
                 # --- AWN: AlphaWire News indicator chip ---
                 awnv=d.get("awn_score",0.0); awc=GREEN if awnv>3 else RED if awnv<-3 else MUTE
@@ -2494,13 +2496,13 @@ if tickers and (run or any(syms)):
                     for j,tr in enumerate(first,1):
                         eqs*=(1+tr["ret"]); rc=GREEN if tr["ret"]>=0 else RED
                         rws.append(f"<tr><td style='{TDx};color:{MUTE}'>{j}</td>"
-                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${tr['bp']:.2f}</td>"
-                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${tr['sp']:.2f}</td>"
-                                   f"<td style='{TDx};text-align:right;color:{rc};font-weight:600'>{tr['ret']*100:+.1f}%</td>"
-                                   f"<td style='{TDx};text-align:right;color:{TXT}'>${eqs:.2f}</td></tr>")
+                                   f"<td style='{TDx};color:{TXT}'>${tr['bp']:.2f}</td>"
+                                   f"<td style='{TDx};color:{TXT}'>${tr['sp']:.2f}</td>"
+                                   f"<td style='{TDx};color:{rc};font-weight:600'>{tr['ret']*100:+.1f}%</td>"
+                                   f"<td style='{TDx};color:{TXT}'>${eqs:.2f}</td></tr>")
                     biggest=max((x['ret'] for x in tl),default=0)*100
-                    THx=f"padding:6px 10px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:right;border-bottom:1px solid {GRID}"
-                    head=(f"<tr><th style='{THx};text-align:left'>#</th><th style='{THx}'>Bought</th>"
+                    THx=f"padding:6px 10px;color:{MUTE};font-size:10px;letter-spacing:.04em;text-align:left;border-bottom:1px solid {GRID}"
+                    head=(f"<tr><th style='{THx}'>#</th><th style='{THx}'>Bought</th>"
                           f"<th style='{THx}'>Sold</th><th style='{THx}'>Trade</th><th style='{THx}'>$100 →</th></tr>")
                     st.markdown(f"**First {len(first)} trades — real prices off the chart, reinvesting each time:**")
                     st.markdown(f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"

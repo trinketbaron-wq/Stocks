@@ -1103,7 +1103,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
         oocol=GREEN if bespoke["beat"] else RED
         in_tag=("beats B&amp;H" if bespoke["in_beat"] else "ties/▼ B&amp;H")
         oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
-        return f"""<div class="card" style="{_top}border-color:{AMBER}66">
+        return f"""<div class="card" style="border-color:{AMBER}66;{_top}">
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
@@ -2118,14 +2118,46 @@ if tickers and (run or any(syms)):
     spy_series=get_spy(period)
     vix_now=float(vix_series.iloc[-1]) if vix_series is not None and len(vix_series) else None
     data={}
+    yrs=PERIOD_YEARS.get(period,2)
     prog=st.progress(0.0,text="Loading market data…")
+    # ---- parallel prefetch: price + fundamentals + news for ALL tickers at once (cuts open time) ----
+    def _prefetch_one(t):
+        try: h=get_hist(t,period)
+        except Exception: h=None
+        fu={}; ni=[]; nsrc="Yahoo"
+        if h is not None and len(h)>=60:
+            try: fu=dict(get_fundamentals(t))
+            except Exception: fu={}
+            try: ni,nsrc=get_company_news(t,period_years=yrs)
+            except Exception: ni,nsrc=[],"Yahoo"
+        return t,h,fu,ni,nsrc
+    _pf={}; _addctx=_ctx=None
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx as _addctx, get_script_run_ctx as _getctx
+        _ctx=_getctx()
+    except Exception:
+        _addctx=_ctx=None
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _mw=min(6,max(1,len(tickers)))
+        _ex=(ThreadPoolExecutor(max_workers=_mw,initializer=_addctx,initargs=(_ctx,))
+             if (_addctx and _ctx) else ThreadPoolExecutor(max_workers=_mw))
+        with _ex:
+            _futs=[_ex.submit(_prefetch_one,t) for t in tickers]
+            for _i,_fut in enumerate(as_completed(_futs),1):
+                _r=_fut.result(); _pf[_r[0]]=(_r[1],_r[2],_r[3],_r[4])
+                prog.progress(_i/len(tickers),text="Loading market data…")
+    except Exception:
+        for _i,t in enumerate(tickers,1):
+            _r=_prefetch_one(t); _pf[_r[0]]=(_r[1],_r[2],_r[3],_r[4])
+            prog.progress(_i/len(tickers),text="Loading market data…")
     for k,t in enumerate(tickers):
-        hist=get_hist(t,period)
+        hist,funda0,news_items,news_src=_pf.get(t,(None,{},[],"Yahoo"))
         if hist is None or len(hist)<60:
-            st.error(f"⚠️ No usable data for **{t}** — check the symbol."); prog.progress((k+1)/len(tickers)); continue
+            st.error(f"⚠️ No usable data for **{t}** — check the symbol."); continue
         o=enrich(hist)
         composite,strength,state,votes,max_w=signal_frame(o,vix_series,spy_series)
-        funda=dict(get_fundamentals(t))   # copy (cached dict) before adding price-derived stat
+        funda=dict(funda0)   # copy (cached dict) before adding price-derived stat
         # price-derived backfill — always reliable since we already hold OHLCV (yfinance .info is flaky)
         try:
             if funda.get("hi52") is None: funda["hi52"]=float(o.High.tail(252).max())
@@ -2145,8 +2177,6 @@ if tickers and (run or any(syms)):
             funda["chg"]=(float(o.Close.iloc[-1])/float(o.Close.iloc[-2])-1)*100 if len(o)>1 else 0.0
         except Exception:
             funda["price"]=funda["chg"]=None
-        yrs=PERIOD_YEARS.get(period,2)
-        news_items,news_src=get_company_news(t, period_years=yrs)
         titles=[n["title"] for n in news_items if n["title"]]
         scores=[vader(x) for x in titles]                       # per-item (display + marks); cheap
         moves=[price_move_after(o,n["when"]) for n in news_items]
@@ -2183,7 +2213,6 @@ if tickers and (run or any(syms)):
             moves=moves, news_marks=news_marks, funda=funda,
             material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs,
             awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last)
-        prog.progress((k+1)/len(tickers))
     prog.empty()
 
     if data:
@@ -2225,8 +2254,10 @@ if tickers and (run or any(syms)):
                 if last and last.get("when"):
                     try: _days=(pd.Timestamp(d["o"].index[-1]).tz_localize(None)-pd.Timestamp(last["when"])).days
                     except Exception: _days=None
-                    ago=f"{_days}d ago" if _days is not None and _days>=0 else "recent"
-                    cat=last.get("category","news"); tail=f"{cat} · {ago}"
+                    cat=last.get("category","news")
+                    if _days is None or _days<0: tail=f"{cat} · recent"
+                    elif _days==0: tail=cat
+                    else: tail=f"{cat} · {_days}d ago"
                 else:
                     tail="no material catalysts in window"
                 st.markdown(f"<div style='border:1px solid {awc}55;border-radius:8px;padding:5px 9px;margin:2px 0 6px;"
@@ -2241,12 +2272,15 @@ if tickers and (run or any(syms)):
                         f"<div style='font-family:Chakra Petch;font-weight:700;font-size:14px;color:{CYAN}'>"
                         f"αAlphawire signal</div>"
                         f"<div style='color:{MUTE};font-size:11px;margin:-2px 0 6px'>"
-                        f"{t}'s own out-of-sample-tested combination — overrides the generic composite.</div>",
+                        f"{t} backtest vs. generic</div>",
                         unsafe_allow_html=True)
-                    st.toggle("Use αAlphawire signal",key=f"besptog_{t}",
-                        help=("ON = drive this stock's signal, chart & backtest from its tuned combination."
-                              if has else "Load backtest data first (button below) to enable this."))
+                    _bon=bool(st.session_state.get(f"besptog_{t}",False))
                     if has:
+                        if st.button(("🟢 Signal ON" if _bon else "⚪ Signal OFF"),
+                                     key=f"besptog_btn_{t}",type=("primary" if _bon else "secondary"),
+                                     use_container_width=True,
+                                     help="ON = drive this stock's signal, chart & backtest from its tuned combination. Tap to flip."):
+                            st.session_state[f"besptog_{t}"]=not _bon; st.rerun()
                         st.caption(f"📈 Backtest as of **{asof}** · {ores.get('n','?')} bars · {ores.get('n_tested','?')} combos tested")
                         if st.button("↻ Update backtest data",key=f"upd_{t}",use_container_width=True,
                                      help="Re-fetch latest prices and re-run the combination search."):
@@ -2258,8 +2292,8 @@ if tickers and (run or any(syms)):
                             st.session_state.pop(f"bespoke_choice_{t}",None)
                             st.rerun()
                     else:
-                        if st.session_state.get(f"besptog_{t}",False):
-                            st.warning("⚠️ Load backtest data first to use the αAlphawire signal — tap the button below.")
+                        st.session_state[f"besptog_{t}"]=False
+                        st.caption("Load backtest data to unlock the αAlphawire signal.")
                         if st.button("⚡ Load backtest data",key=f"load_{t}",type="primary",use_container_width=True,
                                      help="Search indicator combinations on this stock & out-of-sample-test them, unlocking the Alphawire signal."):
                             with st.spinner(f"Searching {t} indicator combinations…"):
@@ -2426,7 +2460,13 @@ if tickers and (run or any(syms)):
                             unsafe_allow_html=True)
 
                 # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----
-                with st.expander(f"α Build {t}'s Alphawire — best indicator combination, tested on unseen data"):
+                st.markdown(
+                    f"<div style='margin:18px 0 0;font-family:\"Chakra Petch\",sans-serif;font-weight:700;"
+                    f"font-size:22px;line-height:1.15;color:{acc}'>α Build {t}'s AlphaWire</div>"
+                    f"<div style='color:{MUTE};font-size:12.5px;margin:1px 0 6px'>"
+                    f"best indicator combination, tested on unseen data</div>",
+                    unsafe_allow_html=True)
+                with st.expander(f"⚙ Open the combination search for {t}"):
                     st.caption("Searches ~25 indicator primitives singly and in **AND / OR / 3-way combinations**, "
                                "tunes them on the **older** part of this stock's history, then scores each on the "
                                "**recent** held-out part. In-sample is the fit; the **out-of-sample column is the only "

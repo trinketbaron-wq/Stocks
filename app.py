@@ -157,20 +157,27 @@ button[kind="pills"], button[kind="pillsActive"]{
 [data-testid="stBaseButton-pillsActive"], [data-testid="stBaseButton-pillsActive"] *,
 [data-testid="stButtonGroup"] button[aria-checked="true"], [data-testid="stButtonGroup"] button[aria-checked="true"] *,
 button[kind="pillsActive"], button[kind="pillsActive"] *{ color:#ff6b73 !important; }
-/* ---- sidebar collapse / expand control: force the icon visible on dark (covers svg AND Material-font glyphs) ---- */
+/* ---- in-sidebar CLOSE arrow: keep light, it sits on the dark sidebar ---- */
 [data-testid="stSidebarCollapseButton"], [data-testid="stSidebarCollapseButton"] *,
 [data-testid="stSidebarHeader"] button, [data-testid="stSidebarHeader"] button *,
-[data-testid="collapsedControl"], [data-testid="collapsedControl"] *,
-[data-testid="stSidebarCollapsedControl"], [data-testid="stSidebarCollapsedControl"] *,
-[data-testid="stExpandSidebarButton"], [data-testid="stExpandSidebarButton"] *,
 [data-testid="baseButton-headerNoPadding"], [data-testid="baseButton-headerNoPadding"] *,
 button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
   color:#e6edf3 !important; fill:#e6edf3 !important;
   opacity:1 !important; visibility:visible !important;
 }
-[data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
-  background:rgba(255,255,255,0.08) !important; border-radius:8px !important;
+[data-testid="stSidebarCollapseButton"]{ background:rgba(255,255,255,0.08) !important; border-radius:8px !important; }
+/* ---- OPEN-SETTINGS control (shown when sidebar is collapsed): BLACK arrow on a light pill, with a label ---- */
+[data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
+  background:#e6edf3 !important; border-radius:10px !important; padding:6px 12px 6px 10px !important;
+  display:flex !important; align-items:center !important; gap:8px !important; width:auto !important;
+  box-shadow:0 4px 14px rgba(0,0,0,0.35) !important; border:1px solid rgba(0,0,0,0.15) !important;
+}
+[data-testid="collapsedControl"] *, [data-testid="stSidebarCollapsedControl"] *, [data-testid="stExpandSidebarButton"] *{
+  color:#0a0e14 !important; fill:#0a0e14 !important; opacity:1 !important; visibility:visible !important;
+}
+[data-testid="collapsedControl"]::after, [data-testid="stSidebarCollapsedControl"]::after, [data-testid="stExpandSidebarButton"]::after{
+  content:"AlphaWire analysis settings"; color:#0a0e14; font-family:'Chakra Petch',sans-serif;
+  font-weight:700; font-size:13px; letter-spacing:.02em; white-space:nowrap;
 }
 /* ---- per-ticker TABS: large, bold, readable (default is tiny & dim) ---- */
 [data-baseweb="tab-list"]{ gap:4px !important; flex-wrap:wrap !important; }
@@ -863,6 +870,102 @@ def fetch_movers(universe_name):
     out=out.reindex(out["chg"].abs().sort_values(ascending=False).index)  # biggest movers first
     return out.reset_index(drop=True)
 
+# ---- FULL SCREENER: score every constituent with AlphaRank + an indicator snapshot ----
+# Tier-1 scan = technical composite only (no per-name news / fundamentals calls — those run
+# later, only on the handful you load into the deck). Keeps a 100-name scan inside the data budget.
+def _scan_row(t, sub, vix=None, spy=None):
+    """Score one ticker's OHLCV frame into a screener row (or None if too little history)."""
+    try:
+        sub=sub.dropna(how="all")
+        if not all(col in sub.columns for col in ("Open","High","Low","Close","Volume")): return None
+        if len(sub)<60: return None
+        o=enrich(sub); comp,strength,state,V,mw=signal_frame(o, vix, spy)
+        c=o["Close"]; last=o.iloc[-1]
+        chg=float((c.iloc[-1]/c.iloc[-2]-1)*100) if len(c)>=2 else np.nan
+        e200=last.get("EMA200"); e50=last.get("EMA50")
+        va=last.get("VolAvg20"); vn=last.get("Volume"); rp=last.get("RangePos")
+        hi20=float(sub["High"].rolling(20).max().iloc[-1])
+        def _f(x): return float(x) if pd.notna(x) else np.nan
+        return dict(ticker=t, alpharank=int(strength.iloc[-1]), state=str(state.iloc[-1]),
+            price=float(c.iloc[-1]), chg=chg, rsi=_f(last.get("RSI")), adx=_f(last.get("ADX")),
+            roc20=_f(last.get("ROC20")),
+            above200=(bool(c.iloc[-1]>e200) if pd.notna(e200) else None),
+            golden=(bool(e50>e200) if (pd.notna(e50) and pd.notna(e200)) else None),
+            macd_pos=(bool(last.get("MACD")>0) if pd.notna(last.get("MACD")) else None),
+            rangepos=_f(rp),
+            vol_surge=(float(vn/va) if (pd.notna(vn) and pd.notna(va) and va>0) else np.nan),
+            new20high=(bool(c.iloc[-1]>=hi20*0.999) if pd.notna(hi20) else None))
+    except Exception:
+        return None
+
+@st.cache_data(ttl=900,show_spinner=False)
+def scan_universe(universe_name, period="1y"):
+    """Batch-download a universe and AlphaRank every name. Cached. Returns DataFrame or None."""
+    tickers=UNIVERSES[universe_name]
+    try:
+        df=yf.download(tickers,period=period,auto_adjust=True,progress=False,group_by="ticker",threads=True)
+    except Exception:
+        return None
+    if df is None or df.empty: return None
+    vix=spy=None  # shared market context (one download each; neutral if unavailable)
+    try:
+        _v=yf.download("^VIX",period=period,auto_adjust=True,progress=False)
+        if _v is not None and not _v.empty and "Close" in _v: vix=_v["Close"]
+    except Exception: pass
+    try:
+        _s=yf.download("^GSPC",period=period,auto_adjust=True,progress=False)
+        if _s is not None and not _s.empty and "Close" in _s: spy=_s["Close"]
+    except Exception: pass
+    multi=isinstance(df.columns,pd.MultiIndex); rows=[]
+    for t in tickers:
+        if multi and t not in df.columns.get_level_values(0): continue
+        try: sub=df[t] if multi else df
+        except Exception: continue
+        r=_scan_row(t, sub.copy(), vix, spy)
+        if r: rows.append(r)
+    return pd.DataFrame(rows) if rows else None
+
+SORT_OPTS=["AlphaRank (high first)","AlphaRank (low first)","Biggest % move","Smallest % move",
+ "RSI (low first)","RSI (high first)","ADX (high first)","Volume surge","52-wk position (high first)"]
+_SORT_MAP={"AlphaRank (high first)":("alpharank",False),"AlphaRank (low first)":("alpharank",True),
+ "Biggest % move":("chg",False),"Smallest % move":("chg",True),"RSI (low first)":("rsi",True),
+ "RSI (high first)":("rsi",False),"ADX (high first)":("adx",False),"Volume surge":("vol_surge",False),
+ "52-wk position (high first)":("rangepos",False)}
+
+def apply_screen(df, f):
+    """Filter + sort scan results by the filter dict f (pure, testable)."""
+    if df is None or df.empty: return df
+    d=df.copy()
+    d=d[(d["alpharank"]>=f.get("ar_min",0))&(d["alpharank"]<=f.get("ar_max",100))]
+    if f.get("verdict","Any")!="Any": d=d[d["state"]==f["verdict"]]
+    d=d[(d["rsi"].fillna(50)>=f.get("rsi_min",0))&(d["rsi"].fillna(50)<=f.get("rsi_max",100))]
+    tr=f.get("trend","Any")
+    if tr=="Above 200-day MA": d=d[d["above200"]==True]
+    elif tr=="Below 200-day MA": d=d[d["above200"]==False]
+    if f.get("golden_only"): d=d[d["golden"]==True]
+    if f.get("new_high"):    d=d[d["new20high"]==True]
+    if f.get("macd_pos"):    d=d[d["macd_pos"]==True]
+    if f.get("adx_min",0)>0: d=d[d["adx"].fillna(0)>=f["adx_min"]]
+    if f.get("vol_min",1.0)>1.0: d=d[d["vol_surge"].fillna(0)>=f["vol_min"]]
+    rp=f.get("range_pos","Any")
+    if rp=="Near 52-week highs": d=d[d["rangepos"].fillna(0)>=0.90]
+    elif rp=="Near 52-week lows": d=d[d["rangepos"].fillna(1)<=0.10]
+    col,asc=_SORT_MAP.get(f.get("sort","AlphaRank (high first)"),("alpharank",False))
+    return d.sort_values(col,ascending=asc,na_position="last").reset_index(drop=True)
+
+# screener widget defaults (keyed by their Streamlit widget key) + one-tap preset screens
+WIDGET_DEFAULTS={"scr_ar_range":(0,100),"scr_verdict":"Any","scr_rsi_range":(0,100),
+ "scr_trend":"Any","scr_range_pos":"Any","scr_sort":"AlphaRank (high first)",
+ "scr_adx_min":0,"scr_vol_min":1.0,"scr_golden_only":False,"scr_new_high":False,"scr_macd_pos":False}
+SCREEN_PRESETS={
+ "— none —":{},
+ "Bullish leaders":{"scr_ar_range":(65,100),"scr_verdict":"BUY","scr_trend":"Above 200-day MA","scr_sort":"AlphaRank (high first)"},
+ "Oversold bounce":{"scr_rsi_range":(0,35),"scr_sort":"RSI (low first)"},
+ "Momentum breakouts":{"scr_new_high":True,"scr_vol_min":1.5,"scr_adx_min":20,"scr_sort":"Biggest % move"},
+ "Golden cross + bullish":{"scr_golden_only":True,"scr_ar_range":(55,100),"scr_sort":"AlphaRank (high first)"},
+ "Near 52-week highs":{"scr_range_pos":"Near 52-week highs","scr_ar_range":(55,100),"scr_sort":"52-wk position (high first)"},
+ "Bearish / weak":{"scr_ar_range":(0,35),"scr_verdict":"SELL","scr_sort":"AlphaRank (low first)"}}
+
 # ==========================================================================
 # COMPONENTS / VIEWS
 # ==========================================================================
@@ -1492,44 +1595,104 @@ def financials_chart(df, tkr, title):
     return dark(fig,300)
 
 def render_movers():
-    st.caption("Biggest 1-day movers in the chosen index. **Tap rows in the table** to select (up to 5), then load them.")
-    src=st.selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
-    with st.spinner(f"Scanning {src}…"):
-        mv=fetch_movers(src)
-    if mv is None or mv.empty:
-        st.error("Couldn't load movers right now (Yahoo may be rate-limiting). "
-                 "Try again shortly, or just type tickers manually.")
-        return
-    top=mv.head(40).reset_index(drop=True)
-    show=pd.DataFrame({"Ticker":top["ticker"],
-        "% move":top["chg"].map(lambda x:f"{x:+.2f}%"),
-        "Price":top["price"].map(lambda x:f"{x:,.2f}")})
-    if "volume" in top.columns:
-        show["Volume"]=top["volume"].map(lambda x:human(x) if pd.notna(x) else "—")
+    st.caption("Scan an index, score every name with **AlphaRank**, then filter. **Tap rows** to select up to 5, "
+               "then load them. (AlphaRank here is the technical composite — news is added once you load a name.)")
+    for k,dv in WIDGET_DEFAULTS.items(): st.session_state.setdefault(k,dv)
+    _pend=st.session_state.pop("_scr_load",None)   # apply a saved-screen load BEFORE widgets exist
+    if _pend is not None:
+        merged=dict(WIDGET_DEFAULTS); merged.update(_pend)
+        for k,vv in merged.items(): st.session_state[k]=vv
+        st.session_state["scr_preset"]="— none —"; st.session_state["_scr_preset_done"]="— none —"
+
+    tcol=st.columns([2,2])
+    src=tcol[0].selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
+    preset=tcol[1].selectbox("Preset screen",list(SCREEN_PRESETS.keys()),key="scr_preset")
+    if st.session_state.get("_scr_preset_done")!=preset:      # apply preset once per change
+        st.session_state["_scr_preset_done"]=preset
+        merged=dict(WIDGET_DEFAULTS); merged.update(SCREEN_PRESETS[preset])
+        for k,vv in merged.items(): st.session_state[k]=vv
+        st.rerun()
+
+    with st.spinner(f"Scanning {src} — scoring names…"):
+        sc=scan_universe(src,period="1y")
+    if sc is None or sc.empty:
+        st.error("Couldn't load the universe right now (Yahoo may be rate-limiting). "
+                 "Try again shortly, or just type tickers manually."); return
+
+    with st.expander("Filters", expanded=True):
+        c1,c2=st.columns(2)
+        ar=c1.slider("AlphaRank range",0,100,key="scr_ar_range")
+        verdict=c2.selectbox("Verdict",["Any","BUY","HOLD","SELL"],key="scr_verdict")
+        c3,c4=st.columns(2)
+        rsi=c3.slider("RSI range",0,100,key="scr_rsi_range")
+        trend=c4.selectbox("Trend (vs 200-day MA)",["Any","Above 200-day MA","Below 200-day MA"],key="scr_trend")
+        c5,c6=st.columns(2)
+        rangep=c5.selectbox("52-week position",["Any","Near 52-week highs","Near 52-week lows"],key="scr_range_pos")
+        sort=c6.selectbox("Sort by",SORT_OPTS,key="scr_sort")
+        c7,c8=st.columns(2)
+        adx_min=c7.slider("Min ADX (trend strength; 0 = off)",0,50,key="scr_adx_min")
+        vol_min=c8.slider("Min volume surge (x avg; 1.0 = off)",1.0,5.0,step=0.5,key="scr_vol_min")
+        c9,c10,c11=st.columns(3)
+        golden=c9.checkbox("Golden cross only",key="scr_golden_only")
+        newhi=c10.checkbox("New 20-day high",key="scr_new_high")
+        macdp=c11.checkbox("MACD > 0",key="scr_macd_pos")
+
+    f=dict(ar_min=ar[0],ar_max=ar[1],rsi_min=rsi[0],rsi_max=rsi[1],verdict=verdict,trend=trend,
+           range_pos=rangep,sort=sort,adx_min=adx_min,vol_min=vol_min,
+           golden_only=golden,new_high=newhi,macd_pos=macdp)
+    res=apply_screen(sc,f)
+
+    with st.expander("Saved screens"):
+        saved=st.session_state.setdefault("screens_saved",{})
+        s1,s2=st.columns([2,1])
+        nm=s1.text_input("Name this screen",key="scr_save_name",placeholder="e.g. My oversold value")
+        if s2.button("💾 Save",use_container_width=True,disabled=not (nm or "").strip()):
+            saved[nm.strip()]={k:st.session_state.get(k,WIDGET_DEFAULTS[k]) for k in WIDGET_DEFAULTS}
+            st.toast(f"Saved screen: {nm.strip()}",icon="💾")
+        if saved:
+            l1,l2,l3=st.columns([2,1,1])
+            pick=l1.selectbox("Load a saved screen",list(saved.keys()),key="scr_load_pick")
+            if l2.button("Load",use_container_width=True):
+                st.session_state["_scr_load"]=saved.get(pick,{}); st.rerun()
+            if l3.button("Delete",use_container_width=True):
+                saved.pop(pick,None); st.rerun()
+        st.caption("Logged in, saved screens persist with your account; otherwise they last while the app is awake.")
+
+    st.caption(f"**{len(res)}** of {len(sc)} names match.")
+    if res.empty:
+        st.info("No matches — loosen the filters."); return
+
+    disp=res.head(60).reset_index(drop=True)
+    show=pd.DataFrame({"Ticker":disp["ticker"],"AlphaRank":disp["alpharank"],"Verdict":disp["state"],
+        "% move":disp["chg"].map(lambda x:f"{x:+.2f}%" if pd.notna(x) else "—"),
+        "Price":disp["price"].map(lambda x:f"{x:,.2f}"),
+        "RSI":disp["rsi"].map(lambda x:f"{x:.0f}" if pd.notna(x) else "—")})
     css=pd.DataFrame("",index=show.index,columns=show.columns)
     for i in show.index:
-        css.loc[i,"% move"]=f"color:{GREEN if top.loc[i,'chg']>=0 else RED};font-weight:600"
+        vc=verdict_color(disp.loc[i,"state"])
+        css.loc[i,"AlphaRank"]=f"color:{vc};font-weight:700"
+        css.loc[i,"Verdict"]=f"color:{vc};font-weight:700"
+        ch=disp.loc[i,"chg"]
+        css.loc[i,"% move"]=f"color:{GREEN if (pd.notna(ch) and ch>=0) else RED};font-weight:600"
     styled=show.style.apply(lambda _:css,axis=None)
 
     picks=[]
-    try:    # native: tap rows to select (Streamlit ≥1.35)
-        ev=st.dataframe(styled,use_container_width=True,height=420,hide_index=True,
+    try:    # native: tap rows to select (Streamlit >=1.35)
+        ev=st.dataframe(styled,use_container_width=True,height=440,hide_index=True,
                         on_select="rerun",selection_mode="multi-row",key="mv_table")
         rows=(ev.selection.rows if hasattr(ev,"selection") else ev["selection"]["rows"])
-        picks=[top.loc[i,"ticker"] for i in rows]
-    except TypeError:   # older Streamlit: fall back to tappable chips (kept in table order)
-        st.dataframe(styled,use_container_width=True,height=300,hide_index=True)
-        chg=dict(zip(top["ticker"],top["chg"])); opts=top["ticker"].tolist()
+        picks=[disp.loc[i,"ticker"] for i in rows]
+    except TypeError:   # older Streamlit: tappable chips
+        st.dataframe(styled,use_container_width=True,height=320,hide_index=True)
+        opts=disp["ticker"].tolist(); arm=dict(zip(disp["ticker"],disp["alpharank"]))
         if hasattr(st,"pills"):
             picks=st.pills("Tap to select",opts,selection_mode="multi",key="mv_pills",
-                           format_func=lambda t:f"{t} {chg[t]:+.0f}%") or []
+                           format_func=lambda t:f"{t} · {arm[t]}") or []
         else:
             picks=st.multiselect("Pick up to 5",opts,max_selections=5,key="mv_pills")
 
     if len(picks)>5:
         st.warning("Max 5 — using your first five."); picks=picks[:5]
-    st.caption("A live AlphaWire **score** needs each name's full price history, so it's computed when you "
-               "load picks (it then appears in the comparison matrix).")
     st.caption(f"**Selected:** {', '.join(picks) if picks else 'tap rows above'}")
     if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
         st.session_state["_load_syms"]=list(picks)[:5]
@@ -1537,7 +1700,7 @@ def render_movers():
         st.rerun()
 
 # real modal if available (Streamlit >=1.37), else inline fallback
-_open_movers = st.dialog("📈 Market Movers")(render_movers) if hasattr(st,"dialog") else render_movers
+_open_movers = st.dialog("🔎 AlphaWire Screener")(render_movers) if hasattr(st,"dialog") else render_movers
 
 def _breakdown_body(d, t):
     bfig,comp,maxw,bstr=score_breakdown(d)
@@ -1666,7 +1829,8 @@ with st.sidebar:
             wl=[s for s in wl if s]
             bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items()
                  if k.startswith("bespoke_choice_")}
-            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp})
+            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp,
+                                     "screens":st.session_state.get("screens_saved",{})})
             st.toast("Saved." if ok else "Save failed (storage).",icon="💾" if ok else "⚠️")
         if st.button("Log out",use_container_width=True):
             st.session_state.pop("user",None); st.rerun()
@@ -1680,6 +1844,7 @@ with st.sidebar:
                     u=_au.strip().lower(); st.session_state["user"]=u
                     dat=get_user_data(u)
                     if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
+                    if dat.get("screens"): st.session_state["screens_saved"]=dat["screens"]
                     for tkr,choice in (dat.get("bespoke") or {}).items():
                         st.session_state[f"bespoke_choice_{tkr}"]=choice
                         st.session_state[f"besptog_{tkr}"]=True
@@ -1748,8 +1913,8 @@ b1,b2=st.columns([2,1])
 run=b1.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
 if b2.button("🔎 Screener: find & add stocks",use_container_width=True):
     _open_movers()
-st.caption("The screener ranks index movers (price, % move, volume) — tap names there to fill the boxes above, "
-           "then Run to score them.")
+st.caption("The screener scores a whole index with AlphaRank, then filters by RSI, trend, breakouts, volume and more "
+           "— tap names there to fill the boxes above, then Run to score them in full.")
 
 tickers=[]
 for s in syms:

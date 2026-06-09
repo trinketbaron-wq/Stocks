@@ -708,7 +708,7 @@ def keyword_stats_html(stats, fwd=5):
 # fires an impulse = the CAUSAL historical average move that this stock made after PRIOR, already-
 # resolved events of the same catalyst type (no look-ahead). Impulses then decay continuously
 # (option B) with a tunable half-life, so a fresh beat reads stronger than a stale one.
-def awn_series(o, material, half_life=5, fwd=5, scale=8.0):
+def awn_series(o, material, half_life=5, fwd=5, scale=18.0):
     idx=_naive_idx(o); n=len(o); c=o["Close"].values
     evs=[]
     for it in material or []:
@@ -717,6 +717,14 @@ def awn_series(o, material, half_life=5, fwd=5, scale=8.0):
         if pos>=n: pos=n-1
         evs.append((pos,it.get("category"),it.get("title","")))
     evs.sort()
+    # Collapse to ONE catalyst per (day, category): a burst of same-day articles about the same
+    # event is one catalyst, not many. Finnhub returns many headlines/day, so without this a single
+    # earnings day fires N impulses and the signal saturates to +/-100 on every name.
+    _seen=set(); _ev=[]
+    for p,cat,title in evs:
+        if (p,cat) in _seen: continue
+        _seen.add((p,cat)); _ev.append((p,cat,title))
+    evs=_ev
     def fwd_move(p):
         e=min(p+fwd,n-1)
         return (c[e]/c[p]-1)*100 if (c[p]>0 and e>p) else 0.0
@@ -988,7 +996,7 @@ def _scan_universe_build(universe_name, period):
         _s=yf.download("^GSPC",period=period,auto_adjust=True,progress=False)
         if _s is not None and not _s.empty and "Close" in _s: spy=_s["Close"]
     except Exception: pass
-    rows=[]; CH=20
+    rows=[]; CH=12; import time as _t
     for i in range(0,len(tickers),CH):
         batch=tickers[i:i+CH]; df=None
         for _ in range(2):                                           # one retry per batch
@@ -997,12 +1005,14 @@ def _scan_universe_build(universe_name, period):
                 if df is not None and not df.empty: break
             except Exception:
                 df=None
-        if df is None or df.empty: continue
+        if df is None or df.empty:
+            _t.sleep(0.4); continue
         for t in batch:
             sub=_extract_ohlcv(df,t)
             if sub is None: continue
             r=_scan_row(t, sub.copy(), vix, spy)
             if r: rows.append(r)
+        _t.sleep(0.4)                                                # gentle between batches (rate-limit friendly)
     return pd.DataFrame(rows) if rows else None
 
 @st.cache_data(ttl=900,show_spinner=False)
@@ -1012,7 +1022,7 @@ def _scan_universe_cached(universe_name, period):
         raise RuntimeError("empty scan")                            # exceptions aren't cached -> a retry actually retries
     return out
 
-def scan_universe(universe_name, period="1y"):
+def scan_universe(universe_name, period="6mo"):
     """Fault-tolerant universe scan -> AlphaRank DataFrame (or None). Successes cached 15 min; failures are not."""
     try:
         return _scan_universe_cached(universe_name, period)
@@ -1708,7 +1718,7 @@ def render_movers():
         st.rerun()
 
     with st.spinner(f"Scanning {src} — scoring names…"):
-        sc=scan_universe(src,period="1y")
+        sc=scan_universe(src,period="6mo")
     if sc is None or sc.empty:
         st.error(f"Couldn't load **{src}** right now — Yahoo is likely throttling this shared server. "
                  f"Try a smaller universe (**Dow Jones 30** is the most reliable), wait ~30s and reopen, "

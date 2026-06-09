@@ -179,6 +179,17 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
   content:"AlphaWire analysis settings"; color:#0a0e14; font-family:'Chakra Petch',sans-serif;
   font-weight:700; font-size:13px; letter-spacing:.02em; white-space:nowrap;
 }
+/* ---- screener modal: Streamlit's dialog uses a LIGHT background, so its light-themed labels/captions
+       were invisible (white-on-white). Force them dark. Buttons + dark widgets are left alone. ---- */
+div[data-testid="stDialog"] [data-testid="stCaptionContainer"],
+div[data-testid="stDialog"] [data-testid="stCaptionContainer"] *,
+div[data-testid="stDialog"] [data-testid="stWidgetLabel"],
+div[data-testid="stDialog"] [data-testid="stWidgetLabel"] *,
+div[data-testid="stDialog"] summary, div[data-testid="stDialog"] summary *,
+div[data-testid="stDialog"] [data-testid="stThumbValue"],
+div[data-testid="stDialog"] [data-testid="stTickBar"], div[data-testid="stDialog"] [data-testid="stTickBar"] *{
+  color:#15202e !important;
+}
 /* ---- per-ticker TABS: large, bold, readable (default is tiny & dim) ---- */
 [data-baseweb="tab-list"]{ gap:4px !important; flex-wrap:wrap !important; }
 button[data-baseweb="tab"]{ padding:8px 16px !important; }
@@ -898,16 +909,23 @@ def _scan_row(t, sub, vix=None, spy=None):
     except Exception:
         return None
 
-@st.cache_data(ttl=900,show_spinner=False)
-def scan_universe(universe_name, period="1y"):
-    """Batch-download a universe and AlphaRank every name. Cached. Returns DataFrame or None."""
+def _extract_ohlcv(df, t):
+    """Pull one ticker's OHLCV out of a yf.download frame regardless of column orientation."""
+    if not isinstance(df.columns, pd.MultiIndex): return df          # single ticker
+    lvl0=set(df.columns.get_level_values(0))
+    if t in lvl0:                                                    # group_by="ticker": (ticker, field)
+        try: return df[t]
+        except Exception: return None
+    if {"Open","High","Low","Close"} & lvl0:                         # group_by="column": (field, ticker)
+        try: return df.xs(t, axis=1, level=1)
+        except Exception: return None
+    return None
+
+def _scan_universe_build(universe_name, period):
+    """Chunked download (batches of 20, one retry each) so Yahoo throttling on one batch
+    doesn't kill the whole scan. Partial results are kept. Returns DataFrame or None."""
     tickers=UNIVERSES[universe_name]
-    try:
-        df=yf.download(tickers,period=period,auto_adjust=True,progress=False,group_by="ticker",threads=True)
-    except Exception:
-        return None
-    if df is None or df.empty: return None
-    vix=spy=None  # shared market context (one download each; neutral if unavailable)
+    vix=spy=None                                                     # shared market context (best-effort)
     try:
         _v=yf.download("^VIX",period=period,auto_adjust=True,progress=False)
         if _v is not None and not _v.empty and "Close" in _v: vix=_v["Close"]
@@ -916,14 +934,36 @@ def scan_universe(universe_name, period="1y"):
         _s=yf.download("^GSPC",period=period,auto_adjust=True,progress=False)
         if _s is not None and not _s.empty and "Close" in _s: spy=_s["Close"]
     except Exception: pass
-    multi=isinstance(df.columns,pd.MultiIndex); rows=[]
-    for t in tickers:
-        if multi and t not in df.columns.get_level_values(0): continue
-        try: sub=df[t] if multi else df
-        except Exception: continue
-        r=_scan_row(t, sub.copy(), vix, spy)
-        if r: rows.append(r)
+    rows=[]; CH=20
+    for i in range(0,len(tickers),CH):
+        batch=tickers[i:i+CH]; df=None
+        for _ in range(2):                                           # one retry per batch
+            try:
+                df=yf.download(batch,period=period,auto_adjust=True,progress=False,group_by="ticker",threads=True)
+                if df is not None and not df.empty: break
+            except Exception:
+                df=None
+        if df is None or df.empty: continue
+        for t in batch:
+            sub=_extract_ohlcv(df,t)
+            if sub is None: continue
+            r=_scan_row(t, sub.copy(), vix, spy)
+            if r: rows.append(r)
     return pd.DataFrame(rows) if rows else None
+
+@st.cache_data(ttl=900,show_spinner=False)
+def _scan_universe_cached(universe_name, period):
+    out=_scan_universe_build(universe_name, period)
+    if out is None or out.empty:
+        raise RuntimeError("empty scan")                            # exceptions aren't cached -> a retry actually retries
+    return out
+
+def scan_universe(universe_name, period="1y"):
+    """Fault-tolerant universe scan -> AlphaRank DataFrame (or None). Successes cached 15 min; failures are not."""
+    try:
+        return _scan_universe_cached(universe_name, period)
+    except Exception:
+        return None
 
 SORT_OPTS=["AlphaRank (high first)","AlphaRank (low first)","Biggest % move","Smallest % move",
  "RSI (low first)","RSI (high first)","ADX (high first)","Volume surge","52-wk position (high first)"]
@@ -1616,8 +1656,9 @@ def render_movers():
     with st.spinner(f"Scanning {src} — scoring names…"):
         sc=scan_universe(src,period="1y")
     if sc is None or sc.empty:
-        st.error("Couldn't load the universe right now (Yahoo may be rate-limiting). "
-                 "Try again shortly, or just type tickers manually."); return
+        st.error(f"Couldn't load **{src}** right now — Yahoo is likely throttling this shared server. "
+                 f"Try a smaller universe (**Dow Jones 30** is the most reliable), wait ~30s and reopen, "
+                 f"or just type tickers into the boxes manually."); return
 
     with st.expander("Filters", expanded=True):
         c1,c2=st.columns(2)

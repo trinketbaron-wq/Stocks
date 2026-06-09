@@ -1200,7 +1200,8 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
         priceline=(f"<div class='cardsub' style='font-family:\"IBM Plex Mono\",monospace;"
                    f"font-size:18px;color:{TXT};margin:2px 0 4px'>${pr:,.2f}{chgtxt}</div>")
     col=verdict_color(state)
-    _top=f"border-top:5px solid {accent};" if accent else ""
+    _bar=(f'<div style="position:absolute;top:0;left:0;right:0;height:6px;background:{accent};'
+          f'border-radius:14px 14px 0 0"></div>') if accent else ""
     if bespoke:
         poscol=GREEN if bespoke["long"] else AMBER
         posbadge="LONG ▲" if bespoke["long"] else "CASH ■"
@@ -1208,7 +1209,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
         oocol=GREEN if bespoke["beat"] else RED
         in_tag=("beats B&amp;H" if bespoke["in_beat"] else "ties/▼ B&amp;H")
         oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
-        return f"""<div class="card" style="border-color:{AMBER}66;{_top}">
+        return f"""<div class="card" style="border-color:{AMBER}66">{_bar}
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
@@ -1222,7 +1223,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
       <div style="font-family:'Chakra Petch',sans-serif;font-size:23px;font-weight:700;color:{incol};margin:3px 0 1px">{bespoke['in_ret']:+.0f}%<span style="font-size:12px;color:{MUTE};font-weight:400"> historical vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
       <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
     </div>"""
-    return f"""<div class="card" style="{_top}">
+    return f"""<div class="card">{_bar}
       <span class="deck-tkr">{tkr}</span>
       <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
@@ -2572,17 +2573,20 @@ if tickers and (run or any(syms)):
 
                 # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----
                 st.markdown(
-                    f"<div style='margin:18px 0 0;font-family:\"Chakra Petch\",sans-serif;font-weight:700;"
-                    f"font-size:22px;line-height:1.15;color:{acc}'>α Build {t}'s AlphaWire</div>"
-                    f"<div style='color:{MUTE};font-size:12.5px;margin:1px 0 6px'>"
-                    f"best indicator combination, tested on unseen data</div>",
+                    f"<div style='margin:22px 0 0;padding:13px 16px;border-radius:12px;"
+                    f"background:linear-gradient(100deg,{acc},{acc}bb);box-shadow:0 6px 20px {acc}33;color:#0a0e14'>"
+                    f"<div style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;line-height:1.15'>"
+                    f"α  Build {t}'s AlphaWire</div>"
+                    f"<div style='font-family:\"IBM Plex Mono\",monospace;font-weight:600;font-size:12px;"
+                    f"opacity:.82;margin-top:3px'>your own indicator combo, tuned &amp; tested on unseen data "
+                    f"— open the search below ▾</div></div>",
                     unsafe_allow_html=True)
-                with st.expander(f"⚙ Open the combination search for {t}"):
+                with st.expander(f"⚙  Open {t}'s combination search", expanded=False):
                     st.caption("Searches ~25 indicator primitives singly and in **AND / OR / 3-way combinations**, "
                                "tunes them on the **older** part of this stock's history, then scores each on the "
                                "**recent** held-out part. In-sample is the fit; the **out-of-sample column is the only "
                                "one that says anything about the future.** A big gap = curve-fitting.")
-                    split_pct=st.slider("Train on first __% of history",50,85,split_default,5,key=f"split_{t}",
+                    split_pct=st.slider("Train on first __% of history",50,90,split_default,5,key=f"split_{t}",
                         help="Percent of history (not days) used to tune. The rest is the out-of-sample test.")
                     if st.button(f"⚡ Search {t} combinations",key=f"optrun_{t}",use_container_width=True):
                         with st.spinner(f"Searching {t} indicator combinations on the train split…"):

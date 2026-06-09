@@ -525,7 +525,7 @@ def _prefetch_ticker(t, period, yrs, key):
         except Exception: fu={}
         items=None
         if key:
-            try: items=_finnhub_range_raw(t, key, max(yrs,1), 120, 1500)
+            try: items=_finnhub_range_raw(t, key, max(yrs,1), 120, 600)
             except Exception: items=None
         if items:
             ni,nsrc=items,"Finnhub"
@@ -2208,10 +2208,18 @@ if tickers and (run or any(syms)):
     if len(_store)>60:                                  # keep session memory bounded
         for _k in sorted(_store,key=lambda kk:_store[kk][0])[:len(_store)-60]: _store.pop(_k,None)
     _pf={t:(lambda e:e[1:] if e else (None,{},[],"Yahoo"))(_store.get((t,period))) for t in tickers}
+    _acache=st.session_state.setdefault("_analysiscache",{})
+    if len(_acache)>40:
+        for _kk in sorted(_acache,key=lambda x:_acache[x][0][1])[:len(_acache)-40]: _acache.pop(_kk,None)
     for k,t in enumerate(tickers):
         hist,funda0,news_items,news_src=_pf.get(t,(None,{},[],"Yahoo"))
         if hist is None or len(hist)<60:
             st.error(f"⚠️ No usable data for **{t}** — check the symbol."); continue
+        _stamp=_store.get((t,period),(0,))[0]
+        _sig=(period,_stamp,awn_halflife,bool(use_ai and api_key))    # data + settings fingerprint
+        _prev=_acache.get(t)
+        if _prev and _prev[0]==_sig:          # unchanged since last run → reuse (no re-scoring on every click)
+            data[t]=_prev[1]; continue
         o=enrich(hist)
         composite,strength,state,votes,max_w=signal_frame(o,vix_series,spy_series)
         funda=dict(funda0)   # copy (cached dict) before adding price-derived stat
@@ -2234,9 +2242,10 @@ if tickers and (run or any(syms)):
             funda["chg"]=(float(o.Close.iloc[-1])/float(o.Close.iloc[-2])-1)*100 if len(o)>1 else 0.0
         except Exception:
             funda["price"]=funda["chg"]=None
-        titles=[n["title"] for n in news_items if n["title"]]
-        scores=[vader(x) for x in titles]                       # per-item (display + marks); cheap
-        moves=[price_move_after(o,n["when"]) for n in news_items]
+        _disp=news_items[:150]                                  # newest items: all the UI ever shows / summarizes
+        titles=[n["title"] for n in _disp if n["title"]]
+        scores=[vader(x) for x in titles]                       # VADER ≈ 6ms/headline — only score what we display
+        moves=[price_move_after(o,n["when"]) for n in _disp]
         # LIVE sentiment uses only RECENT headlines (not years of history) so the verdict isn't diluted
         _lastd=pd.Timestamp(o.index[-1]); _lastd=_lastd.tz_localize(None) if _lastd.tz is not None else _lastd
         def _recent(w):
@@ -2270,6 +2279,7 @@ if tickers and (run or any(syms)):
             moves=moves, news_marks=news_marks, funda=funda,
             material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs,
             awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last)
+        _acache[t]=(_sig,data[t])
     prog.empty()
 
     if data:
@@ -2333,7 +2343,7 @@ if tickers and (run or any(syms)):
                         unsafe_allow_html=True)
                     _bon=bool(st.session_state.get(f"besptog_{t}",False))
                     if has:
-                        if st.button(("🟢 Signal ON" if _bon else "⚪ Signal OFF"),
+                        if st.button(("🟢 ON" if _bon else "⚪ OFF"),
                                      key=f"besptog_btn_{t}",type=("primary" if _bon else "secondary"),
                                      use_container_width=True,
                                      help="ON = drive this stock's signal, chart & backtest from its tuned combination. Tap to flip."):
@@ -2345,6 +2355,7 @@ if tickers and (run or any(syms)):
                             except Exception: pass
                             _dc=st.session_state.get("_datacache",{})
                             for _k in [k for k in list(_dc) if k[0]==t]: _dc.pop(_k,None)
+                            st.session_state.get("_analysiscache",{}).pop(t,None)
                             st.session_state[f"optres_{t}"]=optimize_combo_for_ticker(
                                 d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                             st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]

@@ -35,6 +35,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 BG="#0a0e14"; PANEL="#121a26"; GRID="rgba(255,255,255,0.05)"
 TXT="#e6edf3"; MUTE="#a7b2c0"
 GREEN="#16c784"; RED="#ea3943"; AMBER="#f5a623"; CYAN="#3ec1d3"
+TAB_PALETTE=["#16c784","#4d8bf0","#f5a623","#ea3943","#a78bfa"]  # fixed distinct color per tab position
 
 st.set_page_config(page_title="AlphaWire", page_icon="⚡", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -227,6 +228,9 @@ PLOTLY_DRAW={"displaylogo":False,"scrollZoom":True,
 # ==========================================================================
 def ema(s,n): return s.ewm(span=n,adjust=False).mean()
 def _sign(s): return np.sign(s).fillna(0)
+def _g(x, scale):
+    """Graded vote in (-1,1): tanh saturates, so ±1 is the built-in per-indicator strength cap."""
+    return np.tanh(np.asarray(x, dtype=float)/scale)
 
 def enrich(df):
     o=df.copy(); c,h,l,v=o.Close,o.High,o.Low,o.Volume
@@ -253,15 +257,29 @@ def enrich(df):
     o["MFI"]=100-100/(1+pos.rolling(14).sum()/neg.rolling(14).sum().replace(0,np.nan))
     o["ATR"]=a; o["ATRpct"]=a/c*100
     o["VolAvg20"]=v.rolling(20).mean()
+    # --- expanded indicator set (graded into the composite) ---
+    o["EMA20"]=ema(c,20)
+    o["ROC20"]=(c/c.shift(20)-1)*100.0                         # momentum (20-day % change)
+    hh,ll=h.rolling(14).max(),l.rolling(14).min()
+    o["WilliamsR"]=-100*(hh-c)/(hh-ll).replace(0,np.nan)       # Williams %R (-100..0)
+    tpc=(h+l+c)/3.0; smatp=tpc.rolling(20).mean()
+    mdv=(tpc-smatp).abs().rolling(20).mean()
+    o["CCI"]=(tpc-smatp)/(0.015*mdv.replace(0,np.nan))         # CCI (20)
+    nar=25
+    o["AroonUp"]=h.rolling(nar+1).apply(lambda x:100.0*np.argmax(x)/nar,raw=True)
+    o["AroonDn"]=l.rolling(nar+1).apply(lambda x:100.0*np.argmin(x)/nar,raw=True)
+    o["AroonOsc"]=o["AroonUp"]-o["AroonDn"]                    # Aroon oscillator (-100..100)
+    o["Hi252"]=c.rolling(252,min_periods=20).max(); o["Lo252"]=c.rolling(252,min_periods=20).min()
+    o["RangePos"]=(c-o["Lo252"])/(o["Hi252"]-o["Lo252"]).replace(0,np.nan)  # 52w range position 0..1
     return o
 
 # ---- composite weighting (tunable: how much each indicator moves the score) ----
-WEIGHTS={"trend50":1.0,"trend200":1.0,"cross":1.0,"di":1.0,"rsi":1.0,"macd":1.5,
-         "stoch":1.0,"boll":1.0,"obv":1.0,"mfi":1.0,"rs":1.5,"vix":1.0,"news":1.0}
-BUY_TH=0.25   # net bullish fraction (of max weight) needed to flip BUY / SELL
-
-def _vix_vote(level):   # calm = mild tailwind, fear = headwind
-    return np.select([level<14, level>22],[1,-1],0)
+# ---- composite weighting: each indicator contributes a GRADED vote in [-1,1], scaled by its weight (= its cap) ----
+WEIGHTS={"trend20":1.0,"trend50":1.25,"trend200":1.5,"cross":1.5,"ema50_slope":1.25,
+         "macd_zero":1.0,"macd":1.25,"di":1.25,"aroon":1.0,"roc":1.25,
+         "rsi":1.0,"stoch":1.0,"mfi":1.0,"williams":0.75,"cci":0.75,"boll":1.0,
+         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"news":1.0}
+BUY_TH=0.18   # net bullish fraction (of max weight) needed to flip BUY / SELL (softer graded inputs)
 
 def signal_frame(o, vix_aligned=None, spy_aligned=None):
     """Per-bar weighted votes -> composite, 0-100 strength, BUY/HOLD/SELL state.
@@ -269,23 +287,40 @@ def signal_frame(o, vix_aligned=None, spy_aligned=None):
     in the main loop. Returns (composite, strength, state, votes_df, max_weight)."""
     c=o.Close
     V=pd.DataFrame(index=o.index)
-    V["trend50"]=_sign(c-o.EMA50)
-    V["trend200"]=_sign(c-o.EMA200)
-    V["cross"]=_sign(o.EMA50-o.EMA200)
-    V["di"]=_sign(o.plus_DI-o.minus_DI)
-    V["rsi"]=np.select([o.RSI<30,o.RSI>70],[1,-1],_sign(o.RSI-50))
-    V["macd"]=_sign(o.MACD_hist)
-    V["stoch"]=np.select([o.Stoch_K<20,o.Stoch_K>80],[1,-1],_sign(o.Stoch_K-o.Stoch_D))
-    V["boll"]=np.select([c<o.BB_low,c>o.BB_up],[1,-1],_sign(c-o.BB_mid))
-    V["obv"]=_sign(o.OBV-o.OBV.shift(10))
-    V["mfi"]=np.select([o.MFI<20,o.MFI>80],[1,-1],_sign(o.MFI-50))
-    if spy_aligned is not None:                       # relative strength vs market
+    # trend / structure (trend-following, graded by distance)
+    V["trend20"]=_g(c/o.EMA20-1, 0.04)
+    V["trend50"]=_g(c/o.EMA50-1, 0.06)
+    V["trend200"]=_g(c/o.EMA200-1, 0.12)
+    V["cross"]=_g(o.EMA50/o.EMA200-1, 0.04)
+    V["ema50_slope"]=_g(o.EMA50/o.EMA50.shift(20)-1, 0.05)
+    # MACD
+    V["macd_zero"]=_g(o.MACD/c, 0.012)                 # MACD line vs zero
+    V["macd"]=_g(o.MACD_hist/c, 0.004)                 # MACD histogram momentum
+    # directional / momentum
+    V["di"]=_g(o.plus_DI-o.minus_DI, 18)
+    V["aroon"]=_g(o.AroonOsc, 45)
+    V["roc"]=_g(o.ROC20, 8)
+    # oscillators (MEAN-REVERSION: overbought = caution/bearish, oversold = bullish)
+    V["rsi"]=_g(50-o.RSI, 16)
+    V["stoch"]=_g(50-o.Stoch_K, 22)
+    V["mfi"]=_g(50-o.MFI, 20)
+    V["williams"]=_g(-(o.WilliamsR+50), 22)
+    V["cci"]=_g(-o.CCI, 110)
+    V["boll"]=_g(0.5-o.PctB, 0.32)
+    V["range52"]=_g(o.RangePos-0.5, 0.30)
+    # volume
+    obv_sl=o.OBV-o.OBV.shift(20)
+    obv_dn=(o.OBV.diff().abs().rolling(60).mean()*20).replace(0,np.nan)
+    V["obv"]=_g(obv_sl/obv_dn, 1.5)
+    # relative strength vs market
+    if spy_aligned is not None:
         ratio=c/spy_aligned.reindex(o.index).ffill()
-        V["rs"]=_sign(ratio-ratio.shift(21))
+        V["rs"]=_g(ratio/ratio.shift(21)-1, 0.05)
     else: V["rs"]=0.0
+    # VIX — smooth risk tilt (calm = tailwind, fear scales the headwind)
     if vix_aligned is not None:
         lvl=vix_aligned.reindex(o.index).ffill()
-        V["vix"]=pd.Series(_vix_vote(lvl.values),index=o.index)
+        V["vix"]=_g(18.0-lvl.values, 8.0)
     else: V["vix"]=0.0
     V=V.fillna(0)
     hk=[k for k in WEIGHTS if k!="news"]
@@ -851,21 +886,24 @@ def score_card(tkr,strength,state,funda,bespoke=None):
     col=verdict_color(state)
     if bespoke:
         poscol=GREEN if bespoke["long"] else AMBER
-        badge="LONG ▲" if bespoke["long"] else "CASH ■"
+        posbadge="LONG ▲" if bespoke["long"] else "CASH ■"
         incol=GREEN if bespoke["in_beat"] else RED
         oocol=GREEN if bespoke["beat"] else RED
         in_tag=("beats B&amp;H" if bespoke["in_beat"] else "ties/▼ B&amp;H")
         oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
         return f"""<div class="card" style="border-color:{AMBER}66">
       <span class="deck-tkr">{tkr}</span>
-      <span class="verdict" style="background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{badge}</span>
+      <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
       {priceline}
-      <div class="lab">α Alphawire · {bespoke['rule']} · historical return</div>
-      <div class="num" style="color:{incol}">{bespoke['in_ret']:+.0f}%<span style="font-size:14px;color:{MUTE}"> vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
-      <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
-      <div class="cardsub" style="margin-top:5px"><span style="color:{col};font-weight:700;font-size:14px">{state} · {int(strength)}/100</span><span style="color:{MUTE};font-size:11px"> AlphaRank</span></div>
+      <div class="lab">AlphaRank</div>
+      <div class="num" style="color:{col}">{int(strength)}<span style="font-size:16px;color:{MUTE}">/100</span></div>
       <div class="gauge"><span class="tick" style="left:calc({strength}% - 1.5px)"></span></div>
       <div class="cardsub">{sub}</div>
+      <hr style="border:none;border-top:1px solid {AMBER}55;margin:11px 0 8px"/>
+      <div class="lab" style="color:{AMBER};letter-spacing:.04em;text-transform:none">αAlphawire · {bespoke['rule']}
+        <span style="margin-left:6px;padding:1px 7px;border-radius:6px;font-size:11px;background:{poscol}22;color:{poscol};border:1px solid {poscol}66">{posbadge}</span></div>
+      <div style="font-family:'Chakra Petch',sans-serif;font-size:23px;font-weight:700;color:{incol};margin:3px 0 1px">{bespoke['in_ret']:+.0f}%<span style="font-size:12px;color:{MUTE};font-weight:400"> historical vs B&amp;H {bespoke['in_bh']:+.0f}% · {in_tag}</span></div>
+      <div class="cardsub" style="color:{oocol};font-size:12px">▶ out-of-sample (unseen): <b>{bespoke['oos']:+.0f}%</b> vs B&amp;H {bespoke['bh']:+.0f}% — {oo_tag}</div>
     </div>"""
     return f"""<div class="card">
       <span class="deck-tkr">{tkr}</span>
@@ -885,7 +923,7 @@ def matrix(data):
     disp={}; color={}
     for t,d in data.items():
         o=d["o"].iloc[-1]; v=d["votes"].iloc[-1]; stg=d["strength"]; stt=d["state"]
-        news=d["news_avg"]; nv=d["news_vote"]; vv=int(v.get("vix",0))
+        news=d["news_avg"]; nv=d["news_vote"]; vv=float(v.get("vix",0))
         def cell(val,s): return val,(GREEN if s>0 else RED if s<0 else MUTE)
         rows={}
         rows["VERDICT"]=(stt,verdict_color(stt))
@@ -1414,7 +1452,7 @@ def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke):
         rows.append(f"<tr>{cells}</tr>")
     TH=f"padding:6px 8px;color:{MUTE};font-size:10px;text-align:right;border-bottom:1px solid {GRID}"
     head=(f"<tr><th style='{TH};text-align:left'>Horizon</th><th style='{TH}'>Buy &amp; hold</th>"
-          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>α Alphawire</th>" if has_bespoke else "")+"</tr>")
+          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>αAlphawire</th>" if has_bespoke else "")+"</tr>")
     note=(f"Extrapolates each strategy's <b>historical compound annual rate</b> "
           f"(B&amp;H {cb:+.0f}%/yr, generic {cg:+.0f}%/yr"+(f", Alphawire {cs:+.0f}%/yr" if has_bespoke else "")+
           "). NOT a forecast — it assumes the past rate simply continues, which it won't exactly.")
@@ -1423,9 +1461,11 @@ def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke):
             f"font-family:\"Chakra Petch\",sans-serif;font-size:12.5px'>{head}{''.join(rows)}</table></div>"
             f"<div style='color:{MUTE};font-size:10.5px;margin-top:5px'>{note}</div>")
 
-SCORE_LABELS={"trend50":"Price vs EMA50","trend200":"Price vs EMA200","cross":"EMA 50/200 cross",
- "di":"DI direction","rsi":"RSI","macd":"MACD","stoch":"Stochastic","boll":"Bollinger",
- "obv":"OBV","mfi":"MFI","rs":"Rel strength","vix":"VIX","news":"News"}
+SCORE_LABELS={"trend20":"Price vs EMA20","trend50":"Price vs EMA50","trend200":"Price vs EMA200",
+ "cross":"EMA 50/200 cross","ema50_slope":"EMA50 slope","macd_zero":"MACD vs 0","macd":"MACD momentum",
+ "di":"DI direction","aroon":"Aroon","roc":"Momentum (ROC)","rsi":"RSI","stoch":"Stochastic",
+ "mfi":"MFI","williams":"Williams %R","cci":"CCI","boll":"Bollinger %B","range52":"52w range pos",
+ "obv":"OBV","rs":"Rel strength","vix":"VIX","news":"News"}
 
 def score_breakdown(d):
     """Per-indicator contribution (vote × weight) summing to the composite -> strength."""
@@ -1654,7 +1694,7 @@ with st.sidebar:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 
-    st.markdown("**α Alphawire search**")
+    st.markdown("**αAlphawire search**")
     split_default=st.slider("Train on first __% of history",50,85,70,5,
         help="Percent of history (NOT days) used to TUNE each combination. The remaining % is held out as the "
              "out-of-sample test. 70 = tune on the older 70%, test on the most recent 30%.")
@@ -1833,19 +1873,18 @@ if tickers and (run or any(syms)):
                 st.markdown(f"<div style='border:1px solid {awc}55;border-radius:8px;padding:5px 9px;margin:2px 0 6px;"
                             f"background:{awc}14;font-size:12px'><b style='color:{awc}'>AWN {awnv:+.0f}</b> "
                             f"<span style='color:{MUTE}'>· AlphaWire News · {tail}</span></div>",unsafe_allow_html=True)
-                bdlbl=(f"🔢 Composite score {int(d['strength'])}/100" if bespoke_disp
-                       else f"🔢 How {int(d['strength'])}/100 is built")
+                bdlbl=f"🔢 How {int(d['strength'])}/100 is built"
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
                 # --- α Alphawire signal control (prominent; needs backtest data) ---
                 with st.container(border=True):
                     st.markdown(
                         f"<div style='font-family:Chakra Petch;font-weight:700;font-size:14px;color:{CYAN}'>"
-                        f"α Alphawire signal</div>"
+                        f"αAlphawire signal</div>"
                         f"<div style='color:{MUTE};font-size:11px;margin:-2px 0 6px'>"
                         f"{t}'s own out-of-sample-tested combination — overrides the generic composite.</div>",
                         unsafe_allow_html=True)
-                    st.toggle("Use α Alphawire signal",key=f"besptog_{t}",
+                    st.toggle("Use αAlphawire signal",key=f"besptog_{t}",
                         help=("ON = drive this stock's signal, chart & backtest from its tuned combination."
                               if has else "Load backtest data first (button below) to enable this."))
                     if has:
@@ -1861,7 +1900,7 @@ if tickers and (run or any(syms)):
                             st.rerun()
                     else:
                         if st.session_state.get(f"besptog_{t}",False):
-                            st.warning("⚠️ Load backtest data first to use the α Alphawire signal — tap the button below.")
+                            st.warning("⚠️ Load backtest data first to use the αAlphawire signal — tap the button below.")
                         if st.button("⚡ Load backtest data",key=f"load_{t}",type="primary",use_container_width=True,
                                      help="Search indicator combinations on this stock & out-of-sample-test them, unlocking the Alphawire signal."):
                             with st.spinner(f"Searching {t} indicator combinations…"):
@@ -1882,11 +1921,11 @@ if tickers and (run or any(syms)):
         st.markdown("#### Price & historical signals")
         _tk_order=list(data.keys())
         tabs=st.tabs(_tk_order)
-        _tabcols=[verdict_color(data[_t]["state"]) for _t in _tk_order]
+        _tabcols=[TAB_PALETTE[i%len(TAB_PALETTE)] for i in range(len(_tk_order))]
         components.html(f"""
         <script>
         const COLORS={_json.dumps(_tabcols)};
-        const GREEN='rgb(22, 199, 132)';
+        const PALETTE=['rgb(22, 199, 132)','rgb(77, 139, 240)','rgb(245, 166, 35)','rgb(234, 57, 67)','rgb(167, 139, 250)'];
         function paint(){{
           try{{
             const doc=window.parent.document;
@@ -1898,20 +1937,27 @@ if tickers and (run or any(syms)):
             let active=0;
             tabs.forEach((b,i)=>{{ if(b.getAttribute('aria-selected')==='true') active=i; }});
             const c=COLORS[active]||'#16c784';
+            // each tab label shows its OWN fixed color; active one bold + full opacity
             tabs.forEach((b,i)=>{{
               const p=b.querySelector('p')||b;
-              p.style.setProperty('color', i===active? c : '#c7d0db','important');
+              p.style.setProperty('color', COLORS[i]||'#c7d0db','important');
+              p.style.setProperty('opacity', i===active?'1':'0.62','important');
+              p.style.setProperty('font-weight', i===active?'800':'600','important');
             }});
+            // title follows the active tab's color
             doc.querySelectorAll('h4,h3,h2').forEach(h=>{{
               if((h.textContent||'').indexOf('Price & historical signals')>-1)
                 h.style.setProperty('color',c,'important'); }});
-            // recolor ANY green bar/border inside the tabs component (robust to markup)
-            const root=list.closest('[data-testid="stTabs"]')||list.parentElement;
+            // underline bar = active tab color (structural + palette sweep, reversible across all colors)
+            const wrap=list.parentElement;
+            const hl=wrap.querySelector('[data-baseweb="tab-highlight"]'); if(hl) hl.style.setProperty('background-color',c,'important');
+            const bd=wrap.querySelector('[data-baseweb="tab-border"]'); if(bd) bd.style.setProperty('background-color',c,'important');
+            const root=list.closest('[data-testid="stTabs"]')||wrap;
             root.querySelectorAll('*').forEach(el=>{{
               const cs=getComputedStyle(el);
-              if(cs.backgroundColor===GREEN) el.style.setProperty('background-color',c,'important');
-              if(cs.borderBottomColor===GREEN) el.style.setProperty('border-bottom-color',c,'important');
-              if(cs.borderTopColor===GREEN) el.style.setProperty('border-top-color',c,'important');
+              if(PALETTE.includes(cs.backgroundColor)) el.style.setProperty('background-color',c,'important');
+              if(PALETTE.includes(cs.borderBottomColor)) el.style.setProperty('border-bottom-color',c,'important');
+              if(PALETTE.includes(cs.borderTopColor)) el.style.setProperty('border-top-color',c,'important');
             }});
           }}catch(e){{}}
         }}
@@ -1920,10 +1966,10 @@ if tickers and (run or any(syms)):
         paint();
         </script>
         """, height=0)
-        for tab,(t,d) in zip(tabs,data.items()):
+        for _ti,(tab,(t,d)) in enumerate(zip(tabs,data.items())):
             with tab:
                 f=d["funda"]
-                acc=verdict_color(d["state"])
+                acc=TAB_PALETTE[_ti%len(TAB_PALETTE)]
                 sect=" · ".join(x for x in [f.get("sector"),f.get("industry")] if x)
                 st.markdown(f"<div style='font-family:\"Chakra Petch\";font-size:15px;color:{acc}'>{f.get('name',t)}"
                             f"<span style='color:{MUTE};font-size:12px'>  {sect}</span></div>",unsafe_allow_html=True)
@@ -1933,8 +1979,8 @@ if tickers and (run or any(syms)):
                 # A per-ticker BESPOKE combination (locked from the optimizer) overrides the sidebar choice.
                 _bsp=st.session_state.get(f"bespoke_{t}")
                 if _bsp:
-                    strat_name="α "+_bsp["label"]
-                    rule=(f"<span style='color:{AMBER}'>**α Alphawire locked for {t}**</span> "
+                    strat_name="α"+_bsp["label"]
+                    rule=(f"<span style='color:{AMBER}'>**αAlphawire locked for {t}**</span> "
                           f"(the indicator mix that best fit its history) — overriding the sidebar. "
                           f"**Long when:** {_bsp['label']}.")
                     pos=combo_series(d["o"],_bsp["spec"],awn=d.get("awn"))
@@ -2050,14 +2096,14 @@ if tickers and (run or any(syms)):
                         labels=[r["label"] for r in top]
                         pick=st.selectbox(f"Preferred combination for {t}",["★ best historical fit"]+labels,
                             key=f"lockpick_{t}",
-                            help="Which combination the α Alphawire toggle uses. Default = best fit on historical data.")
+                            help="Which combination the αAlphawire toggle uses. Default = best fit on historical data.")
                         if st.button(f"Set as {t}'s Alphawire signal",key=f"lockbtn_{t}",use_container_width=True):
                             rr=ores["best"] if pick.startswith("★") else next(r for r in top if r["label"]==pick)
                             st.session_state[f"bespoke_choice_{t}"]=dict(spec=rr["spec"],label=rr["label"])
                             st.rerun()
                         cur=st.session_state.get(f"bespoke_choice_{t}")
                         if cur:
-                            st.caption(f"Preferred: **{cur['label']}**. The **α Alphawire signal** toggle on {t}'s card uses it "
+                            st.caption(f"Preferred: **{cur['label']}**. The **αAlphawire signal** toggle on {t}'s card uses it "
                                        "for the live signal, price chart and backtest.")
                         st.caption("⚠️ A combo that beats B&amp;H **in-sample** but not **out-of-sample** is curve-fit "
                                    "to the past and won't carry forward. Judge by the out-of-sample column.")

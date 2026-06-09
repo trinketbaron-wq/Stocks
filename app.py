@@ -521,7 +521,7 @@ def _prefetch_ticker(t, period, yrs, key):
         h=None
     fu={}; ni=[]; nsrc="Yahoo"
     if h is not None and len(h)>=60:
-        try: fu=dict(_fundamentals_raw(t))
+        try: fu=dict(_fundamentals_fast(t, key))
         except Exception: fu={}
         items=None
         if key:
@@ -864,6 +864,57 @@ def _fundamentals_raw(t):
                 or fi.get("ten_day_average_volume") or fi.get("three_month_average_volume"),
         volume=g("volume","regularMarketVolume") or fi.get("last_volume"))
 get_fundamentals=st.cache_data(ttl=3600,show_spinner=False)(_fundamentals_raw)
+
+def _fundamentals_fast(t, key):
+    """Fast fundamentals: yfinance fast_info (one quick call) + Finnhub metric/profile2 — avoids the
+    SLOW, Yahoo-rate-limited .info call that was choking the opening fetch. Falls back to the .info
+    path when there's no Finnhub key or Finnhub returns nothing."""
+    if not key:
+        return _fundamentals_raw(t)
+    import requests
+    fi={}
+    try:
+        fobj=yf.Ticker(t).fast_info
+        for kk in ["market_cap","year_high","year_low","last_volume",
+                   "ten_day_average_volume","three_month_average_volume"]:
+            try: fi[kk]=fobj[kk]
+            except Exception:
+                try: fi[kk]=getattr(fobj,kk)
+                except Exception: pass
+    except Exception: pass
+    m={}; prof={}
+    try:
+        r=requests.get("https://finnhub.io/api/v1/stock/metric",
+                       params={"symbol":t,"metric":"all","token":key},timeout=8)
+        if r.ok: m=((r.json() or {}).get("metric") or {})
+    except Exception: m={}
+    if not m:
+        return _fundamentals_raw(t)                  # Finnhub blank -> reliable (if slower) yfinance path
+    try:
+        r2=requests.get("https://finnhub.io/api/v1/stock/profile2",
+                        params={"symbol":t,"token":key},timeout=8)
+        if r2.ok: prof=(r2.json() or {})
+    except Exception: prof={}
+    def mm(*keys):
+        for k in keys:
+            v=m.get(k)
+            if v not in (None,"",0): return v
+        return None
+    _div=mm("dividendYieldIndicatedAnnual","currentDividendYieldTTM")   # Finnhub: PERCENT
+    _mar=mm("netProfitMarginTTM","netProfitMarginAnnual")              # Finnhub: PERCENT
+    _capm=prof.get("marketCapitalization") or mm("marketCapitalization")  # Finnhub: MILLIONS
+    return dict(
+        name=prof.get("name") or t, sector=None, industry=prof.get("finnhubIndustry"),
+        market_cap=(float(_capm)*1e6 if _capm not in (None,"",0) else fi.get("market_cap")),
+        pe=mm("peTTM","peBasicExclExtraTTM","peExclExtraTTM"), fpe=None,
+        eps=mm("epsTTM","epsInclExtraItemsTTM","epsBasicExclExtraItemsTTM"),
+        div=(float(_div)/100.0 if _div is not None else None),       # -> fraction (fpct re-multiplies)
+        beta=mm("beta"), pb=mm("pbAnnual","pbQuarterly"),
+        margin=(float(_mar)/100.0 if _mar is not None else None),    # -> fraction
+        hi52=mm("52WeekHigh") or fi.get("year_high"),
+        lo52=mm("52WeekLow") or fi.get("year_low"),
+        avg_vol=fi.get("ten_day_average_volume") or fi.get("three_month_average_volume"),
+        volume=fi.get("last_volume"))
 
 def _extract_fin(stmt):
     """Pull revenue + net income series out of a yfinance income statement frame."""
@@ -2169,8 +2220,8 @@ if b3.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of
     import random as _rnd
     st.session_state["_load_syms"]=_rnd.sample(DEFAULT_POOL,5); st.session_state["_load_mode"]="replace"
     st.rerun()
-st.caption("Opens with a fresh set of 5 — tap **⚡ Run AlphaWire** to score them, **🔄 Randomize** for a new set, "
-           "or **🔎 Screener** to find & add names (clear a slot or randomize if all five are full).")
+st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names "
+           "(clear a slot or randomize if all five are full).")
 
 tickers=[]
 for s in syms:
@@ -2178,8 +2229,7 @@ for s in syms:
     if s and s not in tickers: tickers.append(s)
 tickers=tickers[:5]
 
-if run: st.session_state["_ran"]=True
-if tickers and (run or st.session_state.get("_ran")):
+if tickers and (run or any(syms)):
     prog=st.progress(0.04,text="Loading market data…")    # show feedback immediately, before any network call
     vix_series=get_vix_hist(period)
     spy_series=get_spy(period)
@@ -2221,6 +2271,7 @@ if tickers and (run or st.session_state.get("_ran")):
         _prev=_acache.get(t)
         if _prev and _prev[0]==_sig:          # unchanged since last run → reuse (no re-scoring on every click)
             data[t]=_prev[1]; continue
+        prog.progress(min(0.99,(k+1)/len(tickers)),text=f"Scoring {t}… ({k+1}/{len(tickers)})")
         o=enrich(hist)
         composite,strength,state,votes,max_w=signal_frame(o,vix_series,spy_series)
         funda=dict(funda0)   # copy (cached dict) before adding price-derived stat

@@ -2169,8 +2169,8 @@ if b3.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of
     import random as _rnd
     st.session_state["_load_syms"]=_rnd.sample(DEFAULT_POOL,5); st.session_state["_load_mode"]="replace"
     st.rerun()
-st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names "
-           "(clear a slot or randomize if all five are full).")
+st.caption("Opens with a fresh set of 5 — tap **⚡ Run AlphaWire** to score them, **🔄 Randomize** for a new set, "
+           "or **🔎 Screener** to find & add names (clear a slot or randomize if all five are full).")
 
 tickers=[]
 for s in syms:
@@ -2178,7 +2178,9 @@ for s in syms:
     if s and s not in tickers: tickers.append(s)
 tickers=tickers[:5]
 
-if tickers and (run or any(syms)):
+if run: st.session_state["_ran"]=True
+if tickers and (run or st.session_state.get("_ran")):
+    prog=st.progress(0.04,text="Loading market data…")    # show feedback immediately, before any network call
     vix_series=get_vix_hist(period)
     spy_series=get_spy(period)
     vix_now=float(vix_series.iloc[-1]) if vix_series is not None and len(vix_series) else None
@@ -2189,7 +2191,6 @@ if tickers and (run or any(syms)):
     # ---- parallel RAW prefetch, cached in session_state so reruns / Randomize don't re-hit the network ----
     _store=st.session_state.setdefault("_datacache",{})
     _need=[t for t in tickers if (lambda e:(not e) or (_now-e[0]>900))(_store.get((t,period)))]
-    prog=st.progress(0.0,text="Loading market data…")
     if _need:
         def _work(t): return t,_prefetch_ticker(t,period,yrs,_fkey)
         try:

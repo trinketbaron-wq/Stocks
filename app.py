@@ -1541,12 +1541,14 @@ _open_movers = st.dialog("📈 Market Movers")(render_movers) if hasattr(st,"dia
 
 def _breakdown_body(d, t):
     bfig,comp,maxw,bstr=score_breakdown(d)
-    st.markdown(f"**{t}** · strength **{int(d['strength'])}/100** · **{d['state']}**")
+    st.markdown(f"**{t}** · AlphaRank **{int(d['strength'])}/100** · **{d['state']}**")
     st.plotly_chart(bfig,use_container_width=True,config={"displayModeBar":False})
     st.markdown(f"Sum of contributions = **{comp:+.1f}** of ±{maxw:.0f} possible "
                 f"→ ( {comp:+.1f}/{maxw:.0f} + 1 ) ÷ 2 = **{bstr}/100**. "
-                "Each bar is one indicator's vote (−1/0/+1) × its weight. "
-                "VIX & News only shift the live score; the historical chart uses the technical part.")
+                "Each bar is one indicator's **graded** vote — anywhere from −1 to +1 depending on how "
+                "strong its signal is (capped at ±1) — multiplied by its weight. "
+                "News only nudges the live score (it has no daily history); every other indicator, "
+                "including VIX, is part of the historical signal too.")
 if hasattr(st,"dialog"):
     @st.dialog("🔢 How this score is built")
     def show_breakdown(d, t): _breakdown_body(d, t)

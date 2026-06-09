@@ -298,7 +298,7 @@ def enrich(df):
 WEIGHTS={"trend20":1.0,"trend50":1.25,"trend200":1.5,"cross":1.5,"ema50_slope":1.25,
          "macd_zero":1.0,"macd":1.25,"di":1.25,"aroon":1.0,"roc":1.25,
          "rsi":1.0,"stoch":1.0,"mfi":1.0,"williams":0.75,"cci":0.75,"boll":1.0,
-         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"news":1.0,"awn":0.75}
+         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"awn":0.75}
 BUY_TH=0.18   # net bullish fraction (of max weight) needed to flip BUY / SELL (softer graded inputs)
 
 def signal_frame(o, vix_aligned=None, spy_aligned=None):
@@ -551,6 +551,24 @@ def price_move_after(o, when, horizon=3):
     if pos>=len(idx)-1: return None
     end=min(pos+horizon,len(idx)-1)
     return (float(o.Close.iloc[end])/float(o.Close.iloc[pos])-1)*100
+
+def _spread_news(items, n=10):
+    """Pick ~n headlines SPREAD evenly across the full date range (not just the newest, which for
+    an active stock all cluster in the last day or two). Keeps loading light + the list varied."""
+    its=[x for x in (items or []) if x.get("dt")]
+    if len(its)<=n:
+        return sorted(items or [], key=lambda x:(x.get("dt") or 0), reverse=True)[:n]
+    dts=[x["dt"] for x in its]; lo,hi=min(dts),max(dts)
+    if hi<=lo:
+        return sorted(its, key=lambda x:x["dt"], reverse=True)[:n]
+    targets=[lo+(hi-lo)*i/(n-1) for i in range(n)]   # evenly spaced points in TIME
+    chosen=[]; used=set()
+    for tg in targets:
+        cand=[x for x in its if id(x) not in used]
+        if not cand: break
+        best=min(cand, key=lambda x:abs(x["dt"]-tg)); used.add(id(best)); chosen.append(best)
+    chosen.sort(key=lambda x:x["dt"], reverse=True)
+    return chosen
 
 # ================= MATERIAL-NEWS ENGINE (multi-year) =================
 # Pull years of company news, keep only MATERIAL catalysts (A-filter), find the stock's biggest
@@ -1236,7 +1254,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
     </div>"""
 
 INDICATORS=["VERDICT","ALPHARANK","TREND","EMA 50/200","RSI","MACD","STOCH %K",
-            "BOLLINGER","MFI","REL STR","OBV","ADX","ATR %","VIX","NEWS"]
+            "BOLLINGER","MFI","REL STR","OBV","ADX","ATR %","VIX","AW NEWS"]
 
 def matrix(data):
     """data: {tkr: dict(...)} -> (disp_df, color_df) using the latest votes."""
@@ -1264,7 +1282,8 @@ def matrix(data):
         rows["ATR %"]=(f"{o.ATRpct:.1f}%", CYAN)   # volatility context, not a vote
         rows["VIX"]=(f"{d['vix_now']:.0f}" if d['vix_now'] else "n/a",
                      GREEN if vv>0 else RED if vv<0 else MUTE)
-        rows["NEWS"]=cell(f"{news:+.2f}", nv)
+        _awn=float(d.get("awn_score",0.0))
+        rows["AW NEWS"]=(f"{_awn:+.0f}", GREEN if _awn>3 else RED if _awn<-3 else MUTE)
         disp[t]={k:val[0] for k,val in rows.items()}
         color[t]={k:val[1] for k,val in rows.items()}
     dd=pd.DataFrame(disp).reindex(INDICATORS)
@@ -1285,20 +1304,21 @@ def style_matrix(dd,cc):
 def matrix_html(dd, cc):
     """Dark HTML table (st.dataframe ignores injected CSS and follows the Streamlit theme,
     which renders white without a dark config.toml — so we build the table ourselves)."""
-    th=(f"<th style='position:sticky;left:0;z-index:2;background:{PANEL};color:{MUTE};"
+    th=(f"<th style='position:sticky;left:0;z-index:2;background:{PANEL};color:{TXT};"
         "text-align:left;padding:8px 11px;font-size:11px;letter-spacing:.07em'>INDICATOR</th>")
     for c in dd.columns:
         th+=(f"<th style='background:{PANEL};color:{TXT};text-align:center;padding:8px 11px;"
              f"font-family:\"Chakra Petch\",sans-serif;font-size:14px;border-bottom:1px solid {GRID}'>{c}</th>")
     body=""
     for r in dd.index:
-        body+=(f"<tr><td style='position:sticky;left:0;z-index:1;background:{PANEL};color:{MUTE};"
+        body+=(f"<tr><td style='position:sticky;left:0;z-index:1;background:{PANEL};color:{TXT};"
                f"padding:7px 11px;font-size:11px;white-space:nowrap;border-bottom:1px solid {GRID}'>{r}</td>")
         for c in dd.columns:
             col=cc.loc[r,c]; val=dd.loc[r,c]
             if val is None or (isinstance(val,float) and pd.isna(val)): val=""
             strong = r in ("VERDICT","ALPHARANK")
-            body+=(f"<td style='background:{col}{'33' if strong else '1f'};color:{col};text-align:center;"
+            _tc=(TXT if col==MUTE else col)   # neutral cells: bright text (the muted-on-muted was unreadable)
+            body+=(f"<td style='background:{col}{'33' if strong else '1f'};color:{_tc};text-align:center;"
                    f"padding:7px 11px;font-weight:{700 if strong else 500};font-size:12.5px;"
                    f"border:1px solid {col}44'>{val}</td>")
         body+="</tr>"
@@ -1306,6 +1326,25 @@ def matrix_html(dd, cc):
             f"<table style='width:100%;border-collapse:collapse;background:{BG};"
             f"font-family:\"IBM Plex Mono\",monospace'>"
             f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
+
+def section_header(txt, color=CYAN):
+    """A section title flanked by hard brackets, to set sections apart as their own block."""
+    b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
+       "font-size:27px;line-height:1'>")
+    return (f"<div style='display:flex;align-items:center;gap:9px;margin:22px 0 10px'>{b}[</span>"
+            f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
+            f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
+
+def overview_legend_html(data):
+    """Big, readable legend: a colored BOX + ticker per stock (thin Plotly line swatches were too
+    faint), each in the stock's card/tab color."""
+    cmap={t:TAB_PALETTE[i%len(TAB_PALETTE)] for i,t in enumerate(data.keys())}
+    chips="".join(
+        f"<span style='display:inline-flex;align-items:center;gap:8px;margin:0 16px 7px 0'>"
+        f"<span style='width:19px;height:19px;border-radius:5px;background:{c};display:inline-block;box-shadow:0 0 0 1px {c}'></span>"
+        f"<span style='color:{TXT};font-family:\"Chakra Petch\",sans-serif;font-weight:700;font-size:16px'>{t}</span></span>"
+        for t,c in cmap.items())
+    return f"<div style='display:flex;flex-wrap:wrap;align-items:center;margin:2px 0 8px'>{chips}</div>"
 
 def overlay_indicator(name, data):
     fig=go.Figure()
@@ -1358,7 +1397,7 @@ def overlay_indicator(name, data):
         ts=list(data.keys()); vals=[data[t]["news_avg"] for t in ts]
         cols=[_cmap[t] for t in ts]
         fig.add_trace(go.Bar(x=ts,y=vals,marker_color=cols)); title="News sentiment (current) — above 0 = positive, below = negative"
-    fig.update_layout(title=title)
+    fig.update_layout(title=title, showlegend=False)
     return dark(fig, 380)
 
 def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None):
@@ -1794,7 +1833,7 @@ def score_breakdown(d):
     """Per-indicator contribution (vote × weight) summing to the composite -> strength."""
     v=d["votes"].iloc[-1]
     _awnv=max(-1.0,min(1.0,d.get("awn_score",0.0)/100.0))
-    contrib={k:(d["news_vote"] if k=="news" else _awnv if k=="awn" else float(v.get(k,0)))*WEIGHTS[k] for k in WEIGHTS}
+    contrib={k:(_awnv if k=="awn" else float(v.get(k,0)))*WEIGHTS[k] for k in WEIGHTS}
     s=pd.Series(contrib).reindex(list(WEIGHTS.keys()))
     labels=[SCORE_LABELS[k] for k in s.index]
     colors=[GREEN if x>0 else RED if x<0 else MUTE for x in s.values]
@@ -1959,7 +1998,7 @@ def _breakdown_body(d, t):
                 f"→ ( {comp:+.1f}/{maxw:.0f} + 1 ) ÷ 2 = **{bstr}/100**. "
                 "Each bar is one indicator's **graded** vote — anywhere from −1 to +1 depending on how "
                 "strong its signal is (capped at ±1) — multiplied by its weight. "
-                "News (headline sentiment) and AlphaWire News (the AWN catalyst signal) only nudge the "
+                "AlphaWire News (the AWN catalyst signal) only nudges the "
                 "live score; the price/volume indicators and VIX are part of the historical signal too.")
 if hasattr(st,"dialog"):
     @st.dialog("🔢 How this score is built")
@@ -2303,10 +2342,10 @@ if tickers and (run or any(syms)):
             funda["chg"]=(float(o.Close.iloc[-1])/float(o.Close.iloc[-2])-1)*100 if len(o)>1 else 0.0
         except Exception:
             funda["price"]=funda["chg"]=None
-        _disp=news_items[:150]                                  # newest items: all the UI ever shows / summarizes
-        titles=[n["title"] for n in _disp if n["title"]]
-        scores=[vader(x) for x in titles]                       # VADER ≈ 6ms/headline — only score what we display
+        _disp=_spread_news(news_items, 10)                      # ~10 headlines SPREAD across the window (not the last 2 days)
+        scores=[vader(n["title"]) if n.get("title") else 0.0 for n in _disp]
         moves=[price_move_after(o,n["when"]) for n in _disp]
+        titles=[n["title"] for n in _disp if n["title"]]
         # LIVE sentiment uses only RECENT headlines (not years of history) so the verdict isn't diluted
         _lastd=pd.Timestamp(o.index[-1]); _lastd=_lastd.tz_localize(None) if _lastd.tz is not None else _lastd
         def _recent(w):
@@ -2319,7 +2358,12 @@ if tickers and (run or any(syms)):
         news_vote=1 if news_avg>0.1 else -1 if news_avg<-0.1 else 0
         # ---- MULTI-YEAR MATERIAL NEWS from the SAME deep, staggered set ----
         mat=material_news(news_items)
-        big_moves=find_big_moves(o,window=3,top_n=14,min_pct=6.0,sep=8)
+        _ndates=[pd.Timestamp(m["when"]) for m in mat if m.get("when")]
+        if _ndates:                                   # only hunt big moves inside the window we have news for
+            _since=min(_ndates); _oi=_naive_idx(o); _onews=o[_oi>=_since]
+        else:
+            _onews=o
+        big_moves=find_big_moves(_onews,window=3,top_n=14,min_pct=6.0,sep=8) if len(_onews)>=40 else []
         move_rows=correlate_moves_news(big_moves,mat,window=4)
         kw_stats=news_keyword_stats(o,mat,fwd=5)
         # AWN — AlphaWire News indicator (decaying, causal catalyst signal)
@@ -2327,17 +2371,17 @@ if tickers and (run or any(syms)):
         awn_now=float(awn_score.iloc[-1]); awn_last=awn_latest(mat)
         # ---- LIVE score = technical composite + headline-sentiment vote + AWN (modest weight) ----
         awn_vote=max(-1.0,min(1.0,awn_now/100.0))     # AWN score is ~[-100,100] -> [-1,1] contribution
-        live_comp=float(composite.iloc[-1]+WEIGHTS["news"]*news_vote+WEIGHTS["awn"]*awn_vote)
-        live_max=max_w+WEIGHTS["news"]+WEIGHTS["awn"]
+        live_comp=float(composite.iloc[-1]+WEIGHTS["awn"]*awn_vote)
+        live_max=max_w+WEIGHTS["awn"]
         lr=live_comp/live_max
         live_state="BUY" if lr>=BUY_TH else "SELL" if lr<=-BUY_TH else "HOLD"
         live_strength=round((lr+1)/2*100)
-        # chart markers = MATERIAL catalysts only (not the recent noise headlines)
-        mat_marks=[(m["when"],vader(m["title"]),f"[{m['category']}] {m['title']}") for m in mat if m.get("when")]
-        news_marks=mat_marks if mat_marks else [(n["when"],sc,n["title"]) for n,sc in zip(news_items,scores) if n["when"]]
+        # chart markers = MATERIAL catalysts only (not the recent noise headlines); cap VADER work
+        mat_marks=[(m["when"],vader(m["title"]),f"[{m['category']}] {m['title']}") for m in mat[:40] if m.get("when")]
+        news_marks=mat_marks if mat_marks else [(n["when"],sc,n["title"]) for n,sc in zip(_disp,scores) if n["when"]]
         data[t]=dict(o=o,votes=votes,strength=live_strength,state=live_state,
             strength_series=strength, state_series=state, vix_now=vix_now,
-            vix_series=vix_series, spy_series=spy_series, news=news_items, news_src=news_src,
+            vix_series=vix_series, spy_series=spy_series, news=_disp, news_src=news_src,
             news_avg=news_avg, news_vote=news_vote, scores=scores, titles=titles,
             moves=moves, news_marks=news_marks, funda=funda,
             material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs,
@@ -2396,6 +2440,8 @@ if tickers and (run or any(syms)):
                 bdlbl=f"🔢 How {int(d['strength'])}/100 is built"
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
+                st.markdown(f"<div style='border-top:2px dotted {TAB_PALETTE[_ci%len(TAB_PALETTE)]};"
+                            f"margin:11px 1px 9px;opacity:.85'></div>",unsafe_allow_html=True)
                 # --- α Alphawire signal control (prominent; needs backtest data) ---
                 with st.container(border=True):
                     st.markdown(
@@ -2436,15 +2482,16 @@ if tickers and (run or any(syms)):
                             st.rerun()
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
-        st.markdown("#### Indicator matrix")
+        st.markdown(section_header("Indicator matrix"),unsafe_allow_html=True)
         dd,cc=matrix(data)
         st.markdown(matrix_html(dd,cc),unsafe_allow_html=True)
         choice=pick_indicator()
         st.markdown(f"##### 🔍 {choice}")
+        st.markdown(overview_legend_html(data),unsafe_allow_html=True)
         st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)
 
         # PER-STOCK PRICE + SIGNALS
-        st.markdown("#### Price & historical signals")
+        st.markdown(section_header("Price & historical signals"),unsafe_allow_html=True)
         _tk_order=list(data.keys())
         tabs=st.tabs(_tk_order)
         _tabcols=[TAB_PALETTE[i%len(TAB_PALETTE)] for i in range(len(_tk_order))]
@@ -2688,29 +2735,31 @@ if tickers and (run or any(syms)):
                     st.caption(f"Biggest single winner across all {ts['n']} trades: {biggest:+.1f}%. "
                                "If a price here doesn't match the chart, tell me which line.")
 
-                # ---- MATERIAL catalysts vs the biggest moves (multi-year) ----
-                mrows=d.get("move_rows") or []
-                if mrows:
-                    nmat=len(d.get("material") or []); hitn=sum(1 for r in mrows if r["had"])
-                    with st.expander(f"📰 Material catalysts vs {t}'s biggest moves — last {d.get('news_years','?')}y "
-                                     f"({nmat} catalysts, {hitn}/{len(mrows)} big moves had news)",expanded=False):
-                        st.caption("The stock's largest ~3-day moves, each lined up against **material** news "
-                                   "(earnings, guidance, M&A, analyst, regulatory, etc.) within ±4 days — the noise "
-                                   "headlines are filtered out. Some moves had a clear catalyst; some didn't.")
-                        st.markdown(big_moves_table_html(mrows),unsafe_allow_html=True)
-                        if d.get("kw_stats"):
+                # ---- MATERIAL catalysts vs the biggest moves (only moves that HAD a catalyst) ----
+                mrows=[r for r in (d.get("move_rows") or []) if r.get("had")]
+                kws=d.get("kw_stats") or []
+                if mrows or kws:
+                    nmat=len(d.get("material") or [])
+                    with st.expander(f"📰 {t}'s catalysts & big moves — last {d.get('news_years','?')}y "
+                                     f"({nmat} material catalysts)",expanded=False):
+                        if mrows:
+                            st.caption("The biggest ~3-day moves that **lined up with material news** "
+                                       "(earnings, guidance, M&A, analyst, regulatory, etc.) within ±4 days. "
+                                       "Moves with no catalyst nearby are left out.")
+                            st.markdown(big_moves_table_html(mrows),unsafe_allow_html=True)
+                        if kws:
                             st.markdown("**Which catalysts moved the stock** — average 5-day move after each type fired:")
-                            st.markdown(keyword_stats_html(d["kw_stats"],fwd=5),unsafe_allow_html=True)
+                            st.markdown(keyword_stats_html(kws,fwd=5),unsafe_allow_html=True)
                             st.caption("Correlation, not causation — a small sample of past events. A catalyst that "
                                        "averaged positive historically can still disappoint next time.")
                         if not _has_finnhub:
                             st.caption("⚠️ Using Yahoo's shallow recent feed. Add **FINNHUB_API_KEY** in Secrets for "
-                                       "multi-year history — that's what makes this table reach back across the chart.")
+                                       "multi-year history — that's what lets this reach back across the chart.")
                         elif d["news_src"]!="Finnhub":
                             st.caption("Finnhub returned no history for this symbol — showing Yahoo's recent feed instead.")
 
                 # ---- news: two-pane table + reaction summary ----
-                st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']} · {len(d['news'])} headlines</span>",unsafe_allow_html=True)
+                st.markdown(f"##### 📰 News & price reaction  <span style='color:{MUTE};font-size:12px'>via {d['news_src']} · {len(d['news'])} headlines spread across the window</span>",unsafe_allow_html=True)
                 if d["titles"]:
                     sgn=np.sign(d["news_avg"]) if abs(d["news_avg"])>0.05 else 0
                     mom=d["strength_series"].iloc[-1]-50

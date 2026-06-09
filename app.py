@@ -296,7 +296,7 @@ def enrich(df):
 WEIGHTS={"trend20":1.0,"trend50":1.25,"trend200":1.5,"cross":1.5,"ema50_slope":1.25,
          "macd_zero":1.0,"macd":1.25,"di":1.25,"aroon":1.0,"roc":1.25,
          "rsi":1.0,"stoch":1.0,"mfi":1.0,"williams":0.75,"cci":0.75,"boll":1.0,
-         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"news":1.0}
+         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"news":1.0,"awn":0.75}
 BUY_TH=0.18   # net bullish fraction (of max weight) needed to flip BUY / SELL (softer graded inputs)
 
 def signal_frame(o, vix_aligned=None, spy_aligned=None):
@@ -341,7 +341,7 @@ def signal_frame(o, vix_aligned=None, spy_aligned=None):
         V["vix"]=_g(18.0-lvl.values, 8.0)
     else: V["vix"]=0.0
     V=V.fillna(0)
-    hk=[k for k in WEIGHTS if k!="news"]
+    hk=[k for k in WEIGHTS if k not in ("news","awn")]
     w=pd.Series({k:WEIGHTS[k] for k in hk})
     composite=(V[hk]*w).sum(axis=1)
     max_w=float(w.abs().sum())
@@ -1783,12 +1783,13 @@ SCORE_LABELS={"trend20":"Price vs EMA20","trend50":"Price vs EMA50","trend200":"
  "cross":"EMA 50/200 cross","ema50_slope":"EMA50 slope","macd_zero":"MACD vs 0","macd":"MACD momentum",
  "di":"DI direction","aroon":"Aroon","roc":"Momentum (ROC)","rsi":"RSI","stoch":"Stochastic",
  "mfi":"MFI","williams":"Williams %R","cci":"CCI","boll":"Bollinger %B","range52":"52w range pos",
- "obv":"OBV","rs":"Rel strength","vix":"VIX","news":"News"}
+ "obv":"OBV","rs":"Rel strength","vix":"VIX","news":"News","awn":"AlphaWire News"}
 
 def score_breakdown(d):
     """Per-indicator contribution (vote × weight) summing to the composite -> strength."""
     v=d["votes"].iloc[-1]
-    contrib={k:(d["news_vote"] if k=="news" else float(v.get(k,0)))*WEIGHTS[k] for k in WEIGHTS}
+    _awnv=max(-1.0,min(1.0,d.get("awn_score",0.0)/100.0))
+    contrib={k:(d["news_vote"] if k=="news" else _awnv if k=="awn" else float(v.get(k,0)))*WEIGHTS[k] for k in WEIGHTS}
     s=pd.Series(contrib).reindex(list(WEIGHTS.keys()))
     labels=[SCORE_LABELS[k] for k in s.index]
     colors=[GREEN if x>0 else RED if x<0 else MUTE for x in s.values]
@@ -1953,8 +1954,8 @@ def _breakdown_body(d, t):
                 f"→ ( {comp:+.1f}/{maxw:.0f} + 1 ) ÷ 2 = **{bstr}/100**. "
                 "Each bar is one indicator's **graded** vote — anywhere from −1 to +1 depending on how "
                 "strong its signal is (capped at ±1) — multiplied by its weight. "
-                "News only nudges the live score (it has no daily history); every other indicator, "
-                "including VIX, is part of the historical signal too.")
+                "News (headline sentiment) and AlphaWire News (the AWN catalyst signal) only nudge the "
+                "live score; the price/volume indicators and VIX are part of the historical signal too.")
 if hasattr(st,"dialog"):
     @st.dialog("🔢 How this score is built")
     def show_breakdown(d, t): _breakdown_body(d, t)
@@ -2298,11 +2299,6 @@ if tickers and (run or any(syms)):
                  else [vader(x) for x in recent_titles]) if recent_titles else []
         news_avg=float(np.mean(rscores)) if rscores else 0.0
         news_vote=1 if news_avg>0.1 else -1 if news_avg<-0.1 else 0
-        live_comp=float(composite.iloc[-1]+WEIGHTS["news"]*news_vote)
-        live_max=max_w+WEIGHTS["news"]
-        lr=live_comp/live_max
-        live_state="BUY" if lr>=BUY_TH else "SELL" if lr<=-BUY_TH else "HOLD"
-        live_strength=round((lr+1)/2*100)
         # ---- MULTI-YEAR MATERIAL NEWS from the SAME deep, staggered set ----
         mat=material_news(news_items)
         big_moves=find_big_moves(o,window=3,top_n=14,min_pct=6.0,sep=8)
@@ -2311,6 +2307,13 @@ if tickers and (run or any(syms)):
         # AWN — AlphaWire News indicator (decaying, causal catalyst signal)
         awn_raw,awn_long,awn_score=awn_series(o,mat,half_life=awn_halflife,fwd=5)
         awn_now=float(awn_score.iloc[-1]); awn_last=awn_latest(mat)
+        # ---- LIVE score = technical composite + headline-sentiment vote + AWN (modest weight) ----
+        awn_vote=max(-1.0,min(1.0,awn_now/100.0))     # AWN score is ~[-100,100] -> [-1,1] contribution
+        live_comp=float(composite.iloc[-1]+WEIGHTS["news"]*news_vote+WEIGHTS["awn"]*awn_vote)
+        live_max=max_w+WEIGHTS["news"]+WEIGHTS["awn"]
+        lr=live_comp/live_max
+        live_state="BUY" if lr>=BUY_TH else "SELL" if lr<=-BUY_TH else "HOLD"
+        live_strength=round((lr+1)/2*100)
         # chart markers = MATERIAL catalysts only (not the recent noise headlines)
         mat_marks=[(m["when"],vader(m["title"]),f"[{m['category']}] {m['title']}") for m in mat if m.get("when")]
         news_marks=mat_marks if mat_marks else [(n["when"],sc,n["title"]) for n,sc in zip(news_items,scores) if n["when"]]

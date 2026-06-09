@@ -169,19 +169,23 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
   opacity:1 !important; visibility:visible !important;
 }
 [data-testid="stSidebarCollapseButton"]{ background:rgba(255,255,255,0.08) !important; border-radius:8px !important; }
-/* ---- OPEN-SETTINGS control (shown when sidebar is collapsed): BLACK arrow on a light pill, with a label ---- */
+/* ---- OPEN-SETTINGS control (sidebar collapsed): DARK glass pill on the black header, with a label ---- */
 [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{
-  background:#e6edf3 !important; border-radius:10px !important; padding:6px 12px 6px 10px !important;
+  background:rgba(18,26,38,0.92) !important; border-radius:10px !important; padding:6px 13px 6px 10px !important;
   display:flex !important; align-items:center !important; gap:8px !important; width:auto !important;
-  box-shadow:0 4px 14px rgba(0,0,0,0.35) !important; border:1px solid rgba(0,0,0,0.15) !important;
+  box-shadow:0 4px 16px rgba(0,0,0,0.5) !important; border:1px solid rgba(62,193,211,0.45) !important;
 }
 [data-testid="collapsedControl"] *, [data-testid="stSidebarCollapsedControl"] *, [data-testid="stExpandSidebarButton"] *{
-  color:#0a0e14 !important; fill:#0a0e14 !important; opacity:1 !important; visibility:visible !important;
+  color:#e6edf3 !important; fill:#3ec1d3 !important; opacity:1 !important; visibility:visible !important;
 }
 [data-testid="collapsedControl"]::after, [data-testid="stSidebarCollapsedControl"]::after, [data-testid="stExpandSidebarButton"]::after{
-  content:"AlphaWire analysis settings"; color:#0a0e14; font-family:'Chakra Petch',sans-serif;
+  content:"⚙ Analysis settings"; color:#e6edf3; font-family:'Chakra Petch',sans-serif;
   font-weight:700; font-size:13px; letter-spacing:.02em; white-space:nowrap;
 }
+/* ---- kill the white Streamlit header strip + colored decoration; pull the page content up ---- */
+[data-testid="stHeader"]{ background:transparent !important; }
+[data-testid="stDecoration"]{ display:none !important; }
+[data-testid="stMainBlockContainer"], .block-container, .main .block-container{ padding-top:3rem !important; }
 /* ---- screener modal: Streamlit's dialog uses a LIGHT background, so its light-themed labels/captions
        were invisible (white-on-white). Force them dark. Buttons + dark widgets are left alone. ---- */
 div[data-testid="stDialog"] [data-testid="stCaptionContainer"],
@@ -2019,6 +2023,7 @@ def pick_indicator():
 # ==========================================================================
 # UI
 # ==========================================================================
+_top_slot=st.container()   # account/login strip pinned to the very top (filled once auth fns exist)
 st.markdown("""
 <div class="hero">
 <svg viewBox="0 0 460 124" style="width:100%;max-width:520px;height:auto;display:block" role="img" aria-label="AlphaWire">
@@ -2106,47 +2111,45 @@ def save_user_data(username,data):
     if username not in db: return False
     db[username]["data"]=data; return _save_db(db)
 
-with st.sidebar:
-    st.header("⚙ Settings")
-
-    # ---- account: log in to save your watchlist + bespoke combinations ----
+# ---- account / login strip (TOP of page, dark theme — replaces the old white settings bar) ----
+with _top_slot:
     _user=st.session_state.get("user")
     if _user:
-        st.success(f"👤 Signed in: **{_user}**")
-        if st.button("💾 Save watchlist + Alphawire rules",use_container_width=True):
-            wl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]
-            wl=[s for s in wl if s]
-            bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items()
-                 if k.startswith("bespoke_choice_")}
-            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp,
-                                     "screens":st.session_state.get("screens_saved",{})})
+        _ar=st.columns([3,2,2])
+        _ar[0].markdown(f"<div style='font-family:\"Chakra Petch\",sans-serif;color:{GREEN};"
+                        f"font-weight:700;font-size:15px;padding-top:7px'>👤 {_user}</div>",unsafe_allow_html=True)
+        if _ar[1].button("💾 Save",use_container_width=True,key="acct_save",
+                         help="Save your watchlist + Alphawire rules to this account"):
+            wl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]; wl=[s for s in wl if s]
+            bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items() if k.startswith("bespoke_choice_")}
+            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp,"screens":st.session_state.get("screens_saved",{})})
             st.toast("Saved." if ok else "Save failed (storage).",icon="💾" if ok else "⚠️")
-        if st.button("Log out",use_container_width=True):
+        if _ar[2].button("Log out",use_container_width=True,key="acct_logout"):
             st.session_state.pop("user",None); st.rerun()
     else:
-        with st.expander("👤 Log in / Register — save your setup"):
+        with st.expander("👤 Log in / Register — save your watchlist & Alphawire rules"):
             _au=st.text_input("Username",key="auth_u")
             _ap=st.text_input("Password",type="password",key="auth_p")
-            _ac=st.columns(2)
-            if _ac[0].button("Log in",use_container_width=True,key="auth_login"):
+            _acc=st.columns(2)
+            if _acc[0].button("Log in",use_container_width=True,key="auth_login"):
                 if verify_user(_au,_ap):
                     u=_au.strip().lower(); st.session_state["user"]=u
                     dat=get_user_data(u)
                     if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
                     if dat.get("screens"): st.session_state["screens_saved"]=dat["screens"]
                     for tkr,choice in (dat.get("bespoke") or {}).items():
-                        st.session_state[f"bespoke_choice_{tkr}"]=choice
-                        st.session_state[f"besptog_{tkr}"]=True
+                        st.session_state[f"bespoke_choice_{tkr}"]=choice; st.session_state[f"besptog_{tkr}"]=True
                     st.rerun()
                 else:
                     st.error("Wrong username or password.")
-            if _ac[1].button("Register",use_container_width=True,key="auth_reg"):
-                ok,msg=register_user(_au,_ap)
-                (st.success if ok else st.error)(msg)
+            if _acc[1].button("Register",use_container_width=True,key="auth_reg"):
+                ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
                 if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
-        st.caption("Optional. Accounts persist while the app stays awake; on the free tier they reset when the "
-                   "app reboots (no permanent database attached).")
-    st.divider()
+            st.caption("Optional. Accounts persist while the app stays awake; on the free tier they reset on reboot.")
+
+with st.sidebar:
+    st.header("⚙ Settings")
+    st.caption("Log in at the top of the page to save your watchlist & rules.")
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
 

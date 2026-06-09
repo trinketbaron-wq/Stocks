@@ -1307,15 +1307,16 @@ def matrix_html(dd, cc):
 
 def overlay_indicator(name, data):
     fig=go.Figure()
+    _cmap={t:TAB_PALETTE[i%len(TAB_PALETTE)] for i,t in enumerate(data.keys())}  # same color per stock as its card/tab
     def add(col, fn):
         for t,d in data.items():
             s=fn(d["o"]).tail(180)
-            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6)))
+            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6,color=_cmap[t])))
     title=name
     if name in ("VERDICT","ALPHARANK"):
         for t,d in data.items():
             s=d["strength_series"].tail(180)
-            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.8)))
+            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.8,color=_cmap[t])))
         fig.add_hrect(y0=60,y1=100,fillcolor=GREEN,opacity=0.06,line_width=0)
         fig.add_hrect(y0=0,y1=40,fillcolor=RED,opacity=0.06,line_width=0)
         title="AlphaRank over time (0–100)"
@@ -1337,14 +1338,14 @@ def overlay_indicator(name, data):
                 rel=(px/px.iloc[0])/(sp/sp.iloc[0])*100
             else:
                 rel=px/px.iloc[0]*100
-            fig.add_trace(go.Scatter(x=rel.index,y=rel,name=t,mode="lines",line=dict(width=1.7)))
+            fig.add_trace(go.Scatter(x=rel.index,y=rel,name=t,mode="lines",line=dict(width=1.7,color=_cmap[t])))
         fig.add_hline(y=100,line=dict(dash="dash",width=.7,color=CYAN))
         title="Relative strength vs S&P 500 (>100 = outperforming)"
     elif name=="BOLLINGER": add("%B",lambda o:o.PctB); fig.add_hline(y=1,line=dict(dash="dash",width=.6,color=RED)); fig.add_hline(y=0,line=dict(dash="dash",width=.6,color=GREEN)); title="Bollinger %B (0=lower band, 1=upper)"
     elif name in ("TREND","EMA 50/200"):
         for t,d in data.items():
             s=d["o"].Close.tail(180); s=s/s.iloc[0]*100
-            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6)))
+            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6,color=_cmap[t])))
         title="Price rebased to 100 (relative trend)"
     elif name=="VIX":
         vs=data[next(iter(data))]["vix_series"]
@@ -1353,8 +1354,8 @@ def overlay_indicator(name, data):
         title="VIX — market fear"
     elif name=="NEWS":
         ts=list(data.keys()); vals=[data[t]["news_avg"] for t in ts]
-        cols=[GREEN if v>0.05 else RED if v<-0.05 else MUTE for v in vals]
-        fig.add_trace(go.Bar(x=ts,y=vals,marker_color=cols)); title="News sentiment (current)"
+        cols=[_cmap[t] for t in ts]
+        fig.add_trace(go.Bar(x=ts,y=vals,marker_color=cols)); title="News sentiment (current) — above 0 = positive, below = negative"
     fig.update_layout(title=title)
     return dark(fig, 380)
 

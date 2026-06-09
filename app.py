@@ -81,7 +81,7 @@ h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.
 .hero p {{ color:{MUTE}; margin:6px 0 0; font-size:13px; }}
 /* score cards */
 .cardwrap {{ display:flex; gap:14px; flex-wrap:wrap; margin:10px 0 4px; }}
-.card {{ flex:1; min-width:150px; background:{PANEL}; border-radius:14px; padding:16px 16px 14px;
+.card {{ flex:1; min-width:150px; background:{PANEL}; border-radius:14px; padding:13px 15px 11px;
     border:1px solid rgba(255,255,255,0.07); position:relative;
     box-shadow:0 10px 30px rgba(0,0,0,0.35); animation:rise .5s ease both; }}
 @keyframes rise {{ from{{opacity:0;transform:translateY(12px)}} to{{opacity:1;transform:none}} }}
@@ -90,18 +90,19 @@ h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.
     padding:3px 10px; border-radius:999px; letter-spacing:.08em; }}
 .card .num {{ font-size:40px; font-weight:600; line-height:1.05; margin-top:0; }}
 .card .lab {{ color:{MUTE}; font-size:11px; text-transform:uppercase; letter-spacing:.12em; line-height:1.15; margin-bottom:1px; }}
-.gauge {{ height:9px; border-radius:6px; margin-top:12px; position:relative;
+.gauge {{ height:9px; border-radius:6px; margin-top:9px; position:relative;
     background:linear-gradient(90deg,{RED} 0%,{AMBER} 50%,{GREEN} 100%); opacity:.85; }}
 .gauge .tick {{ position:absolute; top:-4px; width:3px; height:17px; border-radius:2px;
     background:#fff; box-shadow:0 0 8px rgba(255,255,255,0.8); }}
 .subnote {{ color:{MUTE}; font-size:11px; margin-top:8px; }}
-.cardsub {{ color:{MUTE}; font-size:11px; margin-top:9px; line-height:1.5; }}
+.cardsub {{ color:{MUTE}; font-size:11px; margin-top:6px; line-height:1.45; }}
 .fgrid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(116px,1fr)); gap:10px; margin:4px 0 14px; }}
 .fstat {{ background:{PANEL}; border:1px solid rgba(255,255,255,0.06); border-radius:10px; padding:9px 12px; }}
 .fstat .k {{ color:{MUTE}; font-size:10px; letter-spacing:.1em; text-transform:uppercase; }}
 .fstat .v {{ font-family:'Chakra Petch',sans-serif; font-size:18px; color:{TXT}; margin-top:3px; }}
 hr {{ border-color:rgba(255,255,255,0.08); }}
 [data-testid="stMetricValue"] {{ font-family:'Chakra Petch'; }}
+[data-testid="stColumn"] [data-testid="stVerticalBlock"]{{ gap:0.55rem; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2434,20 +2435,20 @@ if tickers and (run or any(syms)):
                     else: tail=f"{cat} · {_days}d ago"
                 else:
                     tail="no material catalysts in window"
-                st.markdown(f"<div style='border:1px solid {awc}55;border-radius:8px;padding:5px 9px;margin:2px 0 6px;"
+                st.markdown(f"<div style='border:1px solid {awc}55;border-radius:8px;padding:5px 9px;margin:2px 0 3px;"
                             f"background:{awc}14;font-size:12px'><b style='color:{awc}'>AWN {awnv:+.0f}</b> "
                             f"<span style='color:{MUTE}'>· AlphaWire News · {tail}</span></div>",unsafe_allow_html=True)
                 bdlbl=f"🔢 How {int(d['strength'])}/100 is built"
                 if st.button(bdlbl,key=f"bd_{t}",use_container_width=True,help="Per-indicator composite score breakdown"):
                     show_breakdown(d,t)
                 st.markdown(f"<div style='border-top:2px dotted {TAB_PALETTE[_ci%len(TAB_PALETTE)]};"
-                            f"margin:11px 1px 9px;opacity:.85'></div>",unsafe_allow_html=True)
+                            f"margin:6px 1px 5px;opacity:.85'></div>",unsafe_allow_html=True)
                 # --- α Alphawire signal control (prominent; needs backtest data) ---
                 with st.container(border=True):
                     st.markdown(
                         f"<div style='font-family:Chakra Petch;font-weight:700;font-size:14px;color:{CYAN}'>"
                         f"αAlphawire signal</div>"
-                        f"<div style='color:{MUTE};font-size:11px;margin:-2px 0 6px'>"
+                        f"<div style='color:{MUTE};font-size:11px;margin:-2px 0 3px'>"
                         f"{t} backtest vs. generic</div>",
                         unsafe_allow_html=True)
                     _bon=bool(st.session_state.get(f"besptog_{t}",False))
@@ -2480,6 +2481,8 @@ if tickers and (run or any(syms)):
                                     d,split_frac=split_default/100,cost=bt_cost,awn=d.get("awn"))
                                 st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                             st.rerun()
+                st.markdown(f"<div style='border-top:2px dotted {TAB_PALETTE[_ci%len(TAB_PALETTE)]};"
+                            f"margin:4px 1px 0;opacity:.85'></div>",unsafe_allow_html=True)
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
         st.markdown(section_header("Indicator matrix"),unsafe_allow_html=True)

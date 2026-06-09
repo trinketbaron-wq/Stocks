@@ -430,37 +430,52 @@ def get_news(t,n=8):
 
 def _finnhub_key():
     """Locate a Finnhub key from Streamlit secrets (top-level OR a nested [section]) or an
-    environment variable, tolerant of common name variants and stray quotes/whitespace.
-    Returns a clean key string, or '' if none is found."""
-    NAMES={"FINNHUB_API_KEY","FINNHUB_KEY","FINNHUB_TOKEN","FINNHUB"}
+    environment variable. Matches ANY name containing 'FINNHUB', tolerant of surrounding
+    quotes/whitespace and of a pasted 'NAME = value'. Returns a clean key, or '' if none."""
     def _clean(v):
-        try: return str(v).strip().strip('"').strip("'").strip()
+        try: s=str(v).strip().strip('"').strip("'").strip()
         except Exception: return ""
+        if "=" in s:                                   # someone pasted the whole 'FINNHUB_API_KEY = "xxx"' as the value
+            s=s.split("=")[-1].strip().strip('"').strip("'").strip()
+        return s
+    def _hit(name): return "FINNHUB" in str(name).upper()
     try:
         sec=st.secrets
-        for k in list(sec.keys()):                 # top-level, case-insensitive
-            if str(k).upper() in NAMES:
+        for k in list(sec.keys()):                     # top-level
+            if _hit(k):
                 c=_clean(sec[k])
                 if c: return c
-        for k in list(sec.keys()):                 # one level of nesting ([section] tables)
+        for k in list(sec.keys()):                     # one level of nesting ([section] tables)
             v=sec[k]
             if hasattr(v,"keys"):
                 for kk in list(v.keys()):
-                    if str(kk).upper() in NAMES:
+                    if _hit(kk):
                         c=_clean(v[kk])
                         if c: return c
     except Exception:
         pass
     try:
         import os
-        for n in NAMES:
-            v=os.environ.get(n) or os.environ.get(n.lower())
-            if v:
-                c=_clean(v)
+        for n,vv in os.environ.items():
+            if _hit(n):
+                c=_clean(vv)
                 if c: return c
     except Exception:
         pass
     return ""
+
+def _secret_names():
+    """Names (never values) of secrets the running app can actually see — for diagnostics."""
+    out=[]
+    try:
+        for k in list(st.secrets.keys()):
+            out.append(str(k))
+            v=st.secrets[k]
+            if hasattr(v,"keys"):
+                for kk in list(v.keys()): out.append(f"{k}.{kk}")
+    except Exception:
+        pass
+    return out
 
 @st.cache_data(ttl=900,show_spinner=False)
 def get_finnhub_news(symbol, days=365):
@@ -553,12 +568,10 @@ def material_news(items):
     return out
 
 @st.cache_data(ttl=3600,show_spinner=False)
-def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
-    """Paginate Finnhub company-news in ~quarterly windows back `years`, staggered across time.
-    Free tier only serves ~1yr of history, so we stop after consecutive empty windows
-    (the API has run dry) — that bounds calls and respects the 60/min rate limit."""
-    key=_finnhub_key()
-    if not key: return None
+def _finnhub_range_cached(symbol, key, years, per_call_days, cap):
+    """Paginate Finnhub company-news in ~quarterly windows back `years`. The cache key INCLUDES
+    the API key, so the instant a valid key appears this re-fetches instead of serving a stale
+    empty result. Free tier only serves ~1yr, so we stop after consecutive empty windows."""
     import requests, datetime as _dt, time as _time
     end=_dt.date.today(); start_limit=end-_dt.timedelta(days=int(max(years,0.1)*365))
     out={}; cur_to=end; calls=0; empty_streak=0
@@ -587,6 +600,13 @@ def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
         _time.sleep(0.2)                     # gentle on the 60/min free-tier limit
     items=sorted(out.values(),key=lambda x:x["dt"],reverse=True)
     return items or None
+
+def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
+    """Deep, dated company news from Finnhub. Returns None when no key is set (and caches nothing
+    in that case, so adding the key later takes effect immediately)."""
+    key=_finnhub_key()
+    if not key: return None
+    return _finnhub_range_cached(symbol, key, years, per_call_days, cap)
 
 def find_big_moves(o, window=3, top_n=14, min_pct=6.0, sep=8):
     """B-SPINE: the stock's largest ~window-day moves, de-duplicated, chronological."""
@@ -1983,6 +2003,13 @@ with st.sidebar:
                        "(not inside a [section]), exactly:")
             st.code('FINNHUB_API_KEY = "your_key_here"', language="toml")
             st.caption("Save, then **Reboot** the app from the same menu.")
+        _names=_secret_names()
+        st.caption("**Secret names this app can see** (values hidden): " +
+                   (", ".join(f"`{n}`" for n in _names) if _names else "**none — no secrets are reaching this deployment**"))
+        if not any("FINNHUB" in n.upper() for n in _names):
+            st.caption("⚠️ Nothing containing **FINNHUB** appears above — so the key isn't in *this app's* Secrets. "
+                       "It must be pasted in the **Streamlit Cloud dashboard** (Manage app → ⋮ → Settings → Secrets); "
+                       "a `secrets.toml` committed to the GitHub repo does **not** count. Paste it, Save, then **Reboot**.")
         if st.button("Test Finnhub now", use_container_width=True):
             if not _fk:
                 st.error("No key found in Secrets or environment — nothing to test yet.")
@@ -2461,8 +2488,11 @@ if tickers and (run or any(syms)):
                     if summary: st.markdown(f"**What tends to move {t}:** {summary}")
                     st.markdown(news_table_html(d["news"][:30],d["scores"][:30],d["moves"][:30]),unsafe_allow_html=True)
                     if not _has_finnhub:
-                        st.caption("Tip: add a FINNHUB_API_KEY in Secrets for dated, company-specific news "
-                                   "(~1yr free) — that powers the chart markers and the reaction stats above.")
+                        st.caption("Tip: this is Yahoo's recent-only feed (why dates cluster on today and reactions show "
+                                   "“too recent”). For dated, company-specific news back ~1yr — which powers the chart "
+                                   "markers and reaction stats — add **FINNHUB_API_KEY** in the **Streamlit Cloud dashboard** "
+                                   "(not a repo file), then Reboot. Open **⚙ Settings → 🔌 News data status** in the sidebar "
+                                   "to confirm the app can see your key.")
                 else:
                     st.caption("No recent headlines for this ticker.")
 

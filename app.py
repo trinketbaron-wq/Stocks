@@ -951,7 +951,7 @@ def _scan_row(t, sub, vix=None, spy=None):
     try:
         sub=sub.dropna(how="all")
         if not all(col in sub.columns for col in ("Open","High","Low","Close","Volume")): return None
-        if len(sub)<60: return None
+        if len(sub)<40: return None
         o=enrich(sub); comp,strength,state,V,mw=signal_frame(o, vix, spy)
         c=o["Close"]; last=o.iloc[-1]
         chg=float((c.iloc[-1]/c.iloc[-2]-1)*100) if len(c)>=2 else np.nan
@@ -984,35 +984,33 @@ def _extract_ohlcv(df, t):
     return None
 
 def _scan_universe_build(universe_name, period):
-    """Chunked download (batches of 20, one retry each) so Yahoo throttling on one batch
-    doesn't kill the whole scan. Partial results are kept. Returns DataFrame or None."""
+    """Score a universe using the SAME single-ticker history endpoint the main app uses
+    (yf.Ticker(t).history) — the multi-ticker yf.download() batch endpoint is unreliable on
+    shared cloud IPs. Names are fetched in parallel; partial results are kept. DataFrame or None."""
     tickers=UNIVERSES[universe_name]
-    vix=spy=None                                                     # shared market context (best-effort)
+    try: vix=get_vix_hist(period)
+    except Exception: vix=None
+    try: spy=get_spy(period)
+    except Exception: spy=None
+    def _one(t):
+        try:
+            df=yf.Ticker(t).history(period=period, auto_adjust=True)   # proven path; works for single names
+            if df is None or df.empty: return None
+            sub=df[["Open","High","Low","Close","Volume"]].dropna(how="all")
+            if len(sub)<40: return None
+            return _scan_row(t, sub.copy(), vix, spy)
+        except Exception:
+            return None
+    rows=[]
     try:
-        _v=yf.download("^VIX",period=period,auto_adjust=True,progress=False)
-        if _v is not None and not _v.empty and "Close" in _v: vix=_v["Close"]
-    except Exception: pass
-    try:
-        _s=yf.download("^GSPC",period=period,auto_adjust=True,progress=False)
-        if _s is not None and not _s.empty and "Close" in _s: spy=_s["Close"]
-    except Exception: pass
-    rows=[]; CH=12; import time as _t
-    for i in range(0,len(tickers),CH):
-        batch=tickers[i:i+CH]; df=None
-        for _ in range(2):                                           # one retry per batch
-            try:
-                df=yf.download(batch,period=period,auto_adjust=True,progress=False,group_by="ticker",threads=True)
-                if df is not None and not df.empty: break
-            except Exception:
-                df=None
-        if df is None or df.empty:
-            _t.sleep(0.4); continue
-        for t in batch:
-            sub=_extract_ohlcv(df,t)
-            if sub is None: continue
-            r=_scan_row(t, sub.copy(), vix, spy)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for r in ex.map(_one, tickers):
+                if r: rows.append(r)
+    except Exception:                                                  # fallback if threads misbehave
+        for t in tickers:
+            r=_one(t)
             if r: rows.append(r)
-        _t.sleep(0.4)                                                # gentle between batches (rate-limit friendly)
     return pd.DataFrame(rows) if rows else None
 
 @st.cache_data(ttl=900,show_spinner=False)
@@ -1022,7 +1020,7 @@ def _scan_universe_cached(universe_name, period):
         raise RuntimeError("empty scan")                            # exceptions aren't cached -> a retry actually retries
     return out
 
-def scan_universe(universe_name, period="6mo"):
+def scan_universe(universe_name, period="3mo"):
     """Fault-tolerant universe scan -> AlphaRank DataFrame (or None). Successes cached 15 min; failures are not."""
     try:
         return _scan_universe_cached(universe_name, period)
@@ -1698,31 +1696,42 @@ def financials_chart(df, tkr, title):
     fig.update_layout(title=title,barmode="group")
     return dark(fig,300)
 
+def _scr_apply_preset():
+    p=st.session_state.get("scr_preset","— none —")
+    merged=dict(WIDGET_DEFAULTS); merged.update(SCREEN_PRESETS.get(p,{}))
+    for k,v in merged.items(): st.session_state[k]=v
+
+def _scr_save_current():
+    nm=(st.session_state.get("scr_save_name") or "").strip()
+    if not nm: return
+    saved=st.session_state.setdefault("screens_saved",{})
+    saved[nm]={k:st.session_state.get(k,WIDGET_DEFAULTS[k]) for k in WIDGET_DEFAULTS}
+
+def _scr_load_saved():
+    name=st.session_state.get("scr_load_pick"); saved=st.session_state.get("screens_saved",{})
+    if name in saved:
+        merged=dict(WIDGET_DEFAULTS); merged.update(saved[name])
+        for k,v in merged.items(): st.session_state[k]=v
+        st.session_state["scr_preset"]="— none —"
+
+def _scr_delete_saved():
+    st.session_state.get("screens_saved",{}).pop(st.session_state.get("scr_load_pick"),None)
+
 def render_movers():
     st.caption("Scan an index, score every name with **AlphaRank**, then filter. **Tap rows** to select up to 5, "
-               "then load them. (AlphaRank here is the technical composite — news is added once you load a name.)")
+               "then load them. This is a fast technical scan on a short window (AlphaWire-light) — the full score, "
+               "news and AWN are computed once you load a name.")
     for k,dv in WIDGET_DEFAULTS.items(): st.session_state.setdefault(k,dv)
-    _pend=st.session_state.pop("_scr_load",None)   # apply a saved-screen load BEFORE widgets exist
-    if _pend is not None:
-        merged=dict(WIDGET_DEFAULTS); merged.update(_pend)
-        for k,vv in merged.items(): st.session_state[k]=vv
-        st.session_state["scr_preset"]="— none —"; st.session_state["_scr_preset_done"]="— none —"
 
     tcol=st.columns([2,2])
     src=tcol[0].selectbox("Universe",list(UNIVERSES.keys()),key="mv_src")
-    preset=tcol[1].selectbox("Preset screen",list(SCREEN_PRESETS.keys()),key="scr_preset")
-    if st.session_state.get("_scr_preset_done")!=preset:      # apply preset once per change
-        st.session_state["_scr_preset_done"]=preset
-        merged=dict(WIDGET_DEFAULTS); merged.update(SCREEN_PRESETS[preset])
-        for k,vv in merged.items(): st.session_state[k]=vv
-        st.rerun()
+    tcol[1].selectbox("Preset screen",list(SCREEN_PRESETS.keys()),key="scr_preset",on_change=_scr_apply_preset)
 
-    with st.spinner(f"Scanning {src} — scoring names…"):
-        sc=scan_universe(src,period="6mo")
+    with st.spinner(f"Scanning {src}…"):
+        sc=scan_universe(src,period="3mo")
     if sc is None or sc.empty:
-        st.error(f"Couldn't load **{src}** right now — Yahoo is likely throttling this shared server. "
-                 f"Try a smaller universe (**Dow Jones 30** is the most reliable), wait ~30s and reopen, "
-                 f"or just type tickers into the boxes manually."); return
+        st.error(f"Couldn't load **{src}** right now. Yahoo may be briefly rate-limiting this server — wait ~20s "
+                 f"and reopen, try **Dow Jones 30**, or just type tickers into the boxes manually."); return
 
     with st.expander("Filters", expanded=True):
         c1,c2=st.columns(2)
@@ -1750,17 +1759,13 @@ def render_movers():
     with st.expander("Saved screens"):
         saved=st.session_state.setdefault("screens_saved",{})
         s1,s2=st.columns([2,1])
-        nm=s1.text_input("Name this screen",key="scr_save_name",placeholder="e.g. My oversold value")
-        if s2.button("💾 Save",use_container_width=True,disabled=not (nm or "").strip()):
-            saved[nm.strip()]={k:st.session_state.get(k,WIDGET_DEFAULTS[k]) for k in WIDGET_DEFAULTS}
-            st.toast(f"Saved screen: {nm.strip()}",icon="💾")
+        s1.text_input("Name this screen",key="scr_save_name",placeholder="e.g. My oversold value")
+        s2.button("💾 Save",use_container_width=True,on_click=_scr_save_current)
         if saved:
             l1,l2,l3=st.columns([2,1,1])
-            pick=l1.selectbox("Load a saved screen",list(saved.keys()),key="scr_load_pick")
-            if l2.button("Load",use_container_width=True):
-                st.session_state["_scr_load"]=saved.get(pick,{}); st.rerun()
-            if l3.button("Delete",use_container_width=True):
-                saved.pop(pick,None); st.rerun()
+            l1.selectbox("Load a saved screen",list(saved.keys()),key="scr_load_pick")
+            l2.button("Load",use_container_width=True,on_click=_scr_load_saved)
+            l3.button("Delete",use_container_width=True,on_click=_scr_delete_saved)
         st.caption("Logged in, saved screens persist with your account; otherwise they last while the app is awake.")
 
     st.caption(f"**{len(res)}** of {len(sc)} names match.")
@@ -1802,7 +1807,7 @@ def render_movers():
     if st.button("⚡ Load into AlphaWire",type="primary",disabled=not picks,use_container_width=True):
         st.session_state["_load_syms"]=list(picks)[:5]
         st.session_state.pop("mv_pills",None); st.session_state.pop("mv_table",None)
-        st.rerun()
+        st.rerun()   # closing the dialog here is intended — returns to the deck with picks loaded
 
 # real modal if available (Streamlit >=1.37), else inline fallback
 _open_movers = st.dialog("🔎 AlphaWire Screener")(render_movers) if hasattr(st,"dialog") else render_movers

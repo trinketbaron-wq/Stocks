@@ -36,6 +36,8 @@ BG="#0a0e14"; PANEL="#121a26"; GRID="rgba(255,255,255,0.05)"
 TXT="#e6edf3"; MUTE="#a7b2c0"
 GREEN="#16c784"; RED="#ea3943"; AMBER="#f5a623"; CYAN="#3ec1d3"
 TAB_PALETTE=["#16c784","#4d8bf0","#f5a623","#ea3943","#a78bfa"]  # fixed distinct color per tab position
+def _rgba(hex_c,a=1.0):
+    h=str(hex_c).lstrip("#"); return f"rgba({int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{a})"
 
 st.set_page_config(page_title="AlphaWire", page_icon="⚡", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -1369,12 +1371,12 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
     si=[i for i in sells if idx[i] in d.index]
     fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.07,row_heights=[0.7,0.3],
                       subplot_titles=("","AlphaRank (0–100)"))
-    if style=="line":
-        fig.add_trace(go.Scatter(x=d.index,y=d.Close,name="price",mode="lines",
-            line=dict(width=1.8,color=TXT)),row=1,col=1)
-    else:
-        fig.add_trace(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close,
-            name="px",increasing_line_color=GREEN,decreasing_line_color=RED),row=1,col=1)
+    # price drawn as BOTH candles and a line — turn either on/off straight from the legend (no sidebar setting)
+    fig.add_trace(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close,
+        name="candles",increasing_line_color=GREEN,decreasing_line_color=RED,
+        visible=(True if style!="line" else "legendonly")),row=1,col=1)
+    fig.add_trace(go.Scatter(x=d.index,y=d.Close,name="line",mode="lines",line=dict(width=1.8,color=TXT),
+        visible=(True if style=="line" else "legendonly")),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA50,name="EMA50",line=dict(width=1,color=CYAN)),row=1,col=1)
     fig.add_trace(go.Scatter(x=d.index,y=d.EMA200,name="EMA200",line=dict(width=1,color=AMBER)),row=1,col=1)
     if trade_pos is not None:   # shade spans where the strategy actually HELD the stock (dark = in cash)
@@ -1382,13 +1384,15 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         for a,b in long_spans(tp):
             fig.add_vrect(x0=d.index[a],x1=d.index[b],fillcolor=GREEN,opacity=0.07,
                           line_width=0,layer="below",row=1,col=1)
-    if fib:
-        hi=float(d.High.max()); lo=float(d.Low.min()); rng=hi-lo
-        for lvl in (0,0.236,0.382,0.5,0.618,0.786,1.0):
-            y=hi-rng*lvl
-            fig.add_hline(y=y,line=dict(color="rgba(245,166,35,0.45)",width=1,dash="dot"),
-                annotation_text=f"{lvl*100:.1f}%  {y:.2f}",annotation_position="right",
-                annotation_font=dict(size=9,color=AMBER),row=1,col=1)
+    # Fibonacci retracement — one toggleable "Fib levels" legend entry (off until you switch it on)
+    hi=float(d.High.max()); lo=float(d.Low.min()); rng=hi-lo
+    _fibvis=(True if fib else "legendonly")
+    for _k,lvl in enumerate((0,0.236,0.382,0.5,0.618,0.786,1.0)):
+        y=hi-rng*lvl
+        fig.add_trace(go.Scatter(x=[d.index[0],d.index[-1]],y=[y,y],mode="lines",
+            name="Fib levels",legendgroup="fib",showlegend=(_k==0),visible=_fibvis,
+            line=dict(color="rgba(245,166,35,0.55)",width=1,dash="dot"),
+            hovertemplate=f"fib {lvl*100:.1f}% — {y:.2f}<extra></extra>"),row=1,col=1)
     if trade_pos is not None:   # connect each BUY to its SELL; green = trade won, red = trade LOST
         wx=[];wy=[];lx=[];ly=[]
         for tr in trade_log(o,trade_pos):
@@ -1517,12 +1521,12 @@ def trade_log_html(trades):
             f"<table style='width:100%;border-collapse:collapse;background:{BG};"
             f"font-family:\"IBM Plex Mono\",monospace;font-size:12px'>{head}{''.join(rows)}</table></div>")
 
-def equity_chart(bt, tkr, label="Strategy"):
+def equity_chart(bt, tkr, label="Strategy", accent=GREEN):
     e=bt["eq"]/bt["eq"].iloc[0]*100; b=bt["bh"]/bt["bh"].iloc[0]*100
     fig=go.Figure()
     fig.add_trace(go.Scatter(x=b.index,y=b,name="Buy & hold",line=dict(width=1.4,color=MUTE)))
-    fig.add_trace(go.Scatter(x=e.index,y=e,name=label,line=dict(width=2,color=GREEN),
-        fill="tonexty",fillcolor="rgba(22,199,132,0.06)"))
+    fig.add_trace(go.Scatter(x=e.index,y=e,name=label,line=dict(width=2,color=accent),
+        fill="tonexty",fillcolor=_rgba(accent,0.07)))
     fig.update_layout(title=f"{tkr} — $100 invested: {label} vs buy &amp; hold")
     return dark(fig,360)
 
@@ -1757,21 +1761,21 @@ def _cagr(total_pct, n_bars):
 
 PROJ_HORIZONS=[("1M",1/12),("3M",0.25),("6M",0.5),("1Y",1),("5Y",5),("10Y",10)]
 
-def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke):
+def projection_table_html(bh_total, gen_total, bsp_total, n_bars, has_bespoke, accent=GREEN):
     cb,cg,cs=_cagr(bh_total,n_bars),_cagr(gen_total,n_bars),(_cagr(bsp_total,n_bars) if has_bespoke else None)
-    def proj(c,y):
+    def proj(c,y,pos=MUTE):
         if c is None or c!=c: return "—"
-        v=((1+c/100)**y-1)*100; col=GREEN if v>=0 else RED
+        v=((1+c/100)**y-1)*100; col=pos if v>=0 else RED
         return f"<span style='color:{col}'>{v:+.0f}%</span>"
     TD=f"padding:5px 8px;border-bottom:1px solid {GRID};text-align:right"
     rows=[]
     for lbl,y in PROJ_HORIZONS:
         cells=f"<td style='{TD};color:{MUTE};text-align:left'>{lbl}</td><td style='{TD}'>{proj(cb,y)}</td><td style='{TD}'>{proj(cg,y)}</td>"
-        if has_bespoke: cells+=f"<td style='{TD}'>{proj(cs,y)}</td>"
+        if has_bespoke: cells+=f"<td style='{TD};font-weight:600'>{proj(cs,y,accent)}</td>"
         rows.append(f"<tr>{cells}</tr>")
     TH=f"padding:6px 8px;color:{MUTE};font-size:10px;text-align:right;border-bottom:1px solid {GRID}"
     head=(f"<tr><th style='{TH};text-align:left'>Horizon</th><th style='{TH}'>Buy &amp; hold</th>"
-          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH}'>αAlphawire</th>" if has_bespoke else "")+"</tr>")
+          f"<th style='{TH}'>Generic signal</th>"+(f"<th style='{TH};color:{accent}'>αAlphawire</th>" if has_bespoke else "")+"</tr>")
     note=(f"Extrapolates each strategy's <b>historical compound annual rate</b> "
           f"(B&amp;H {cb:+.0f}%/yr, generic {cg:+.0f}%/yr"+(f", Alphawire {cs:+.0f}%/yr" if has_bespoke else "")+
           "). NOT a forecast — it assumes the past rate simply continues, which it won't exactly.")
@@ -2133,12 +2137,6 @@ with st.sidebar:
     bt_cost=st.slider("Trade cost (% per switch)",0.0,0.5,0.10,0.05,
         help="Charged each time the strategy moves in or out of the stock.")/100
 
-    st.markdown("**Charts**")
-    chart_style="line" if st.radio("Price style",["Candlestick","Line"],horizontal=True)=="Line" else "candles"
-    show_fib=st.toggle("Fibonacci levels on charts",value=False,
-        help="Auto-draws retracement lines from the visible swing high/low. "
-             "(Plotly has no freehand Fib tool; use the line tool for custom ones.)")
-
     use_ai=st.toggle("Claude news sentiment",value=bool(api_key),disabled=not api_key,
         help="Add ANTHROPIC_API_KEY in Secrets to enable AI-graded news.") if api_key else False
     if not api_key: st.caption("ℹ️ Using built-in finance sentiment analyzer.")
@@ -2192,6 +2190,15 @@ def _merge_slots(cur, picks, mode):
         p=(p or "").strip().upper()
         if p and p not in out and len(out)<5: out.append(p)
     return (out+[""]*5)[:5]
+# a saved page-link (?stocks=...) seeds the boxes on a fresh session, before anything else
+if (not any(f"sym{i}" in st.session_state for i in range(5))) and "_load_syms" not in st.session_state:
+    try:
+        _qp=st.query_params.get("stocks")
+        if _qp:
+            st.session_state["_load_syms"]=[x.strip().upper() for x in _qp.split(",") if x.strip()][:5]
+            st.session_state["_load_mode"]="replace"
+    except Exception:
+        pass
 # movers picker / login hand tickers off via _load_syms; apply BEFORE inputs are created
 if "_load_syms" in st.session_state:
     _vals=_merge_slots([st.session_state.get(f"sym{i}","") for i in range(5)],
@@ -2204,16 +2211,26 @@ if not any(f"sym{i}" in st.session_state for i in range(5)):   # fresh session -
 cols=st.columns(5)
 syms=[cols[i].text_input(f"#{i+1}",key=f"sym{i}",label_visibility="collapsed",
       placeholder=f"#{i+1}") for i in range(5)]
-b1,b2,b3=st.columns([5,4,3])
+b1,b2,b3,b4=st.columns([5,3,4,3])
 run=b1.button("⚡ Run AlphaWire",type="primary",use_container_width=True)
-if b2.button("🔎 Screener: find & add stocks",use_container_width=True):
+if b2.button("💾 Save",use_container_width=True,
+             help="Remember this set of stocks — saved into this page's link. Bookmark the page to come back to them."):
+    _save=[s.strip().upper() for s in syms if s.strip()]
+    if _save:
+        st.query_params["stocks"]=",".join(_save)
+        try: st.toast(f"Saved {len(_save)} stock(s) — bookmark this page to keep them.")
+        except Exception: pass
+    else:
+        try: st.toast("Nothing to save yet — add a symbol first.")
+        except Exception: pass
+if b3.button("🔎 Screener: find & add stocks",use_container_width=True):
     _open_movers()
-if b3.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of 5 names into the boxes"):
+if b4.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of 5 names into the boxes"):
     import random as _rnd
     st.session_state["_load_syms"]=_rnd.sample(DEFAULT_POOL,5); st.session_state["_load_mode"]="replace"
     st.rerun()
-st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names "
-           "(clear a slot or randomize if all five are full).")
+st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names. "
+           "**💾 Save** stores your set in the page link, so bookmarking the page brings it back.")
 
 tickers=[]
 for s in syms:
@@ -2520,10 +2537,10 @@ if tickers and (run or any(syms)):
                 st.caption(f"Full backtest window. ▲/▼ = where **{strat_name}** buys / sells, joined by a thin line "
                            "(**green = that trade won, red = it lost**). **Green shading = holding, dark = in cash** — "
                            "the dark gaps during rallies are the missed upside that makes a strategy trail buy & hold. "
-                           "Diamonds are news; toolbar = drawing tools."
-                           + (" Dotted amber = Fibonacci." if show_fib else ""))
+                           "Diamonds are news; toolbar = drawing tools. "
+                           "**Tap any legend item to show/hide it** — candles vs line, EMAs, BUY/SELL, AlphaRank, Fibonacci.")
                 st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
-                                    big=True,news_marks=d["news_marks"],fib=show_fib,style=chart_style,trade_pos=pos),
+                                    big=True,news_marks=d["news_marks"],trade_pos=pos),
                                 use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
 
                 # ---- financial results (revenue & net income) ----
@@ -2543,7 +2560,7 @@ if tickers and (run or any(syms)):
                 st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
                 st.caption(rule, unsafe_allow_html=True)
                 bt=backtest(d["o"],pos,cost=bt_cost)
-                st.plotly_chart(equity_chart(bt,t,label=strat_name),use_container_width=True,key=f"eq_{t}")
+                st.plotly_chart(equity_chart(bt,t,label=strat_name,accent=acc),use_container_width=True,key=f"eq_{t}")
                 edge=bt["strat_ret"]-bt["bh_ret"]
                 r1=st.columns(3)
                 r1[0].metric("Strategy return",f"{bt['strat_ret']:+.1f}%",f"{edge:+.1f}% vs buy & hold")
@@ -2572,7 +2589,7 @@ if tickers and (run or any(syms)):
                 _has_bsp=bool(_bsp)
                 st.markdown("##### 🔮 Projected potential — 1M to 10Y")
                 st.markdown(projection_table_html(bt["bh_ret"],_gen_bt["strat_ret"],
-                            (bt["strat_ret"] if _has_bsp else None),len(d["o"]),_has_bsp),
+                            (bt["strat_ret"] if _has_bsp else None),len(d["o"]),_has_bsp,accent=acc),
                             unsafe_allow_html=True)
 
                 # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----

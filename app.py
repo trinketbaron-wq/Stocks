@@ -428,10 +428,44 @@ def get_news(t,n=8):
     try: return [parse_news(x) for x in (yf.Ticker(t).news or [])[:n]]
     except Exception: return []
 
+def _finnhub_key():
+    """Locate a Finnhub key from Streamlit secrets (top-level OR a nested [section]) or an
+    environment variable, tolerant of common name variants and stray quotes/whitespace.
+    Returns a clean key string, or '' if none is found."""
+    NAMES={"FINNHUB_API_KEY","FINNHUB_KEY","FINNHUB_TOKEN","FINNHUB"}
+    def _clean(v):
+        try: return str(v).strip().strip('"').strip("'").strip()
+        except Exception: return ""
+    try:
+        sec=st.secrets
+        for k in list(sec.keys()):                 # top-level, case-insensitive
+            if str(k).upper() in NAMES:
+                c=_clean(sec[k])
+                if c: return c
+        for k in list(sec.keys()):                 # one level of nesting ([section] tables)
+            v=sec[k]
+            if hasattr(v,"keys"):
+                for kk in list(v.keys()):
+                    if str(kk).upper() in NAMES:
+                        c=_clean(v[kk])
+                        if c: return c
+    except Exception:
+        pass
+    try:
+        import os
+        for n in NAMES:
+            v=os.environ.get(n) or os.environ.get(n.lower())
+            if v:
+                c=_clean(v)
+                if c: return c
+    except Exception:
+        pass
+    return ""
+
 @st.cache_data(ttl=900,show_spinner=False)
 def get_finnhub_news(symbol, days=365):
     """Dated, company-specific news from Finnhub (needs FINNHUB_API_KEY in Secrets)."""
-    key=st.secrets.get("FINNHUB_API_KEY")
+    key=_finnhub_key()
     if not key: return None
     import requests, datetime as _dt
     to=_dt.date.today(); frm=to-_dt.timedelta(days=days)
@@ -523,7 +557,7 @@ def get_finnhub_news_range(symbol, years=5, per_call_days=120, cap=1500):
     """Paginate Finnhub company-news in ~quarterly windows back `years`, staggered across time.
     Free tier only serves ~1yr of history, so we stop after consecutive empty windows
     (the API has run dry) — that bounds calls and respects the 60/min rate limit."""
-    key=st.secrets.get("FINNHUB_API_KEY")
+    key=_finnhub_key()
     if not key: return None
     import requests, datetime as _dt, time as _time
     end=_dt.date.today(); start_limit=end-_dt.timedelta(days=int(max(years,0.1)*365))
@@ -1812,7 +1846,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
-_has_finnhub=bool(st.secrets.get("FINNHUB_API_KEY"))
+_has_finnhub=bool(_finnhub_key())
 
 # ================= ACCOUNTS (lightweight) =================
 # Username + salted-hash password, stored in a JSON file. NOTE: on Streamlit Community Cloud the
@@ -1938,6 +1972,38 @@ with st.sidebar:
     use_ai=st.toggle("Claude news sentiment",value=bool(api_key),disabled=not api_key,
         help="Add ANTHROPIC_API_KEY in Secrets to enable AI-graded news.") if api_key else False
     if not api_key: st.caption("ℹ️ Using built-in finance sentiment analyzer.")
+
+    with st.expander("🔌 News data status"):
+        _fk=_finnhub_key()
+        if _fk:
+            st.success(f"Finnhub key detected ({_fk[:4]}…{_fk[-3:]}). Dated, company-specific history is enabled.")
+        else:
+            st.warning("No Finnhub key detected — news falls back to Yahoo's recent-only feed.")
+            st.caption("Add it under **Manage app → Settings → Secrets** as a **top-level** line "
+                       "(not inside a [section]), exactly:")
+            st.code('FINNHUB_API_KEY = "your_key_here"', language="toml")
+            st.caption("Save, then **Reboot** the app from the same menu.")
+        if st.button("Test Finnhub now", use_container_width=True):
+            if not _fk:
+                st.error("No key found in Secrets or environment — nothing to test yet.")
+            else:
+                import requests as _rq, datetime as _d
+                try:
+                    _r=_rq.get("https://finnhub.io/api/v1/company-news",
+                        params={"symbol":"AAPL","from":str(_d.date.today()-_d.timedelta(days=30)),
+                                "to":str(_d.date.today()),"token":_fk},timeout=12)
+                    if _r.status_code==200 and isinstance(_r.json(),list):
+                        st.success(f"OK — Finnhub returned {len(_r.json())} AAPL headlines (HTTP 200). "
+                                   "Reopen a stock and news will be Finnhub-sourced.")
+                    elif _r.status_code in (401,403):
+                        st.error(f"HTTP {_r.status_code} — key sent but rejected. Re-check the key value "
+                                 "(no surrounding quotes or spaces *inside* the key itself).")
+                    elif _r.status_code==429:
+                        st.error("HTTP 429 — rate-limited. Wait ~1 min and retry (free tier = 60 calls/min).")
+                    else:
+                        st.error(f"HTTP {_r.status_code} — unexpected: {str(_r.text)[:140]}")
+                except Exception as _e:
+                    st.error(f"Request failed ({type(_e).__name__}) — the host may be blocking outbound calls.")
 
 st.markdown("##### Enter up to 5 symbols")
 # movers picker hands tickers off via _load_syms; apply BEFORE inputs are created

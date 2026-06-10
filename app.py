@@ -86,7 +86,7 @@ h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.
 .cardwrap {{ display:flex; gap:14px; flex-wrap:wrap; margin:10px 0 4px; }}
 .card {{ flex:1; min-width:150px; background:{PANEL}; border-radius:14px; padding:13px 15px 11px;
     border:1px solid rgba(255,255,255,0.07); position:relative;
-    box-shadow:0 10px 30px rgba(0,0,0,0.35); animation:rise .5s ease both; }}
+    box-shadow:0 5px 16px rgba(0,0,0,0.28); animation:rise .5s ease both; }}
 @keyframes rise {{ from{{opacity:0;transform:translateY(12px)}} to{{opacity:1;transform:none}} }}
 .card .deck-tkr {{ font-size:22px; font-weight:700; }}
 .card .verdict {{ float:right; font-family:'Chakra Petch'; font-weight:700; font-size:13px;
@@ -105,7 +105,7 @@ h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.
 .fstat .v {{ font-family:'Chakra Petch',sans-serif; font-size:18px; color:{TXT}; margin-top:3px; }}
 hr {{ border-color:rgba(255,255,255,0.08); }}
 [data-testid="stMetricValue"] {{ font-family:'Chakra Petch'; }}
-[data-testid="stColumn"] [data-testid="stVerticalBlock"]{{ gap:0.55rem; }}
+[data-testid="stColumn"] [data-testid="stVerticalBlock"]{{ gap:0.82rem; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -181,7 +181,7 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 /* ---- kill the white Streamlit header strip + colored decoration; pull the page content up ---- */
 [data-testid="stHeader"]{ background:transparent !important; }
 [data-testid="stDecoration"]{ display:none !important; }
-[data-testid="stMainBlockContainer"], .block-container, .main .block-container{ padding-top:3rem !important; }
+[data-testid="stMainBlockContainer"], .block-container, .main .block-container{ padding-top:1.4rem !important; }
 /* ---- screener modal: Streamlit's dialog uses a LIGHT background, so its light-themed labels/captions
        were invisible (white-on-white). Force them dark. Buttons + dark widgets are left alone. ---- */
 div[data-testid="stDialog"] [data-testid="stCaptionContainer"],

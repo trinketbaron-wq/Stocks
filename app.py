@@ -537,33 +537,44 @@ def get_company_news(t, period_years=1):
 
 def _prefetch_ticker(t, period, yrs, key):
     """Raw, thread-safe fetch (no st.cache_data / no ScriptRunContext needed): price + fundamentals
-    + news. Mirrors the screener's parallel pattern; the caller caches results in session_state so
-    reruns and Randomize don't re-hit the network."""
+    + news + financial statements. Mirrors the screener's parallel pattern; the caller caches results
+    in session_state so reruns and Randomize don't re-hit the network."""
+    tk=None
     try:
-        _df=yf.Ticker(t).history(period=period,auto_adjust=True)
+        tk=yf.Ticker(t)
+        _df=tk.history(period=period,auto_adjust=True)
         h=_df[["Open","High","Low","Close","Volume"]] if (_df is not None and not _df.empty) else None
         if h is not None:
             h=h.dropna(subset=["Close"])         # Yahoo mints an empty 'today' row pre-market (NaN OHLC,
             if h.empty: h=None                   # real volume) -> poisons price/Stoch/ATR/AWN with nan
     except Exception:
         h=None
-    fu={}; ni=[]; nsrc="Yahoo"
+    fu={}; ni=[]; nsrc="Yahoo"; fin=None
     if h is not None and len(h)>=60:
         try: fu=dict(_fundamentals_fast(t, key))
         except Exception: fu={}
+        try:                                     # income statements fetched HERE, in the parallel pool —
+            fin={"annual":_extract_fin(tk.income_stmt),          # they were the slowest SERIAL step,
+                 "quarterly":_extract_fin(tk.quarterly_income_stmt)}   # paid per-tab at render time
+            if fin["annual"] is None and fin["quarterly"] is None: fin=None
+        except Exception:
+            fin=None
         items=None
         if key:
-            try: items=_finnhub_range_raw(t, key, max(yrs,1), 360, 600)
+            # 45-day windows: Finnhub truncates each response to its NEWEST articles, so one big
+            # 360-day window collapsed busy tickers to the last few days. Small windows force one
+            # slice per ~6 weeks -> catalysts spread across the whole year instead.
+            try: items=_finnhub_range_raw(t, key, max(yrs,1), 45, 1500)
             except Exception: items=None
         if items:
             ni,nsrc=items,"Finnhub"
         else:
-            try: _yh=[parse_news(x) for x in (yf.Ticker(t).news or [])[:8]]
+            try: _yh=[parse_news(x) for x in ((tk.news if tk is not None else None) or [])[:8]]
             except Exception: _yh=[]
             ni=[{"title":n.get("title",""),"source":n.get("publisher",""),"url":n.get("url",""),
                  "when":n.get("when",""),"dt":0,"summary":""} for n in _yh]
             nsrc="Yahoo"
-    return h,fu,ni,nsrc
+    return h,fu,ni,nsrc,fin
 
 def _naive_idx(o):
     idx=pd.to_datetime(o.index)
@@ -641,15 +652,16 @@ def material_news(items):
     return out
 
 def _finnhub_range_raw(symbol, key, years, per_call_days, cap):
-    """Paginate Finnhub company-news in ~quarterly windows back `years`. The cache key INCLUDES
-    the API key, so the instant a valid key appears this re-fetches instead of serving a stale
-    empty result. Free tier only serves ~1yr, so we stop after consecutive empty windows."""
+    """Paginate Finnhub company-news in small windows back `years`. Finnhub truncates each response
+    to the NEWEST articles, so windows must be SHORT (≈45d) or busy tickers collapse to the last few
+    days. Each window is trimmed to its newest ~120 items (coverage over completeness). Free tier
+    serves ~1yr; we stop after 3 consecutive empty windows (2 was tripping on quiet small-caps)."""
     import requests, datetime as _dt, time as _time
     end=_dt.date.today(); start_limit=end-_dt.timedelta(days=int(max(years,0.1)*365))
     out={}; cur_to=end; calls=0; empty_streak=0
     while cur_to>start_limit and calls<26:
         cur_from=max(start_limit, cur_to-_dt.timedelta(days=per_call_days)); calls+=1
-        got=0
+        got=[]
         try:
             r=requests.get("https://finnhub.io/api/v1/company-news",
                 params={"symbol":symbol,"from":str(cur_from),"to":str(cur_to),"token":key},timeout=15)
@@ -663,13 +675,21 @@ def _finnhub_range_raw(symbol, key, years, per_call_days, cap):
                 when=_dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                 k2=(when,hl[:60])
                 if k2 in out: continue
-                out[k2]={"title":hl,"source":a.get("source","") or "","url":a.get("url","") or "",
-                         "when":when,"dt":ts,"summary":a.get("summary","") or ""}; got+=1
-        empty_streak = empty_streak+1 if got==0 else 0
-        if empty_streak>=2: break          # API has no more history this far back — stop
+                got.append((k2,{"title":hl,"source":a.get("source","") or "","url":a.get("url","") or "",
+                                "when":when,"dt":ts,"summary":a.get("summary","") or ""}))
+        got.sort(key=lambda kv:kv[1]["dt"],reverse=True)
+        if len(got)>120:                          # thin to ~120 SPREAD across the window (newest-only
+            n=len(got)                            # would keep just the window's tail days and could
+            got=[got[int(i*(n-1)/119)] for i in range(120)]   # miss a mid-window earnings date)
+        for k2,v in got: out[k2]=v
+        empty_streak = empty_streak+1 if not got else 0
+        # quiet windows INSIDE the first year are normal for small-caps (a news drought is not the
+        # data wall) — only treat consecutive empties as "no more history" BEYOND ~1y, where the
+        # free tier actually stops serving.
+        if empty_streak>=2 and (end-cur_to).days>360: break
         cur_to=cur_from-_dt.timedelta(days=1)
         if len(out)>=cap: break
-        _time.sleep(0.2)                     # gentle on the 60/min free-tier limit
+        _time.sleep(0.2)                          # gentle on the 60/min free-tier limit
     items=sorted(out.values(),key=lambda x:x["dt"],reverse=True)
     return items or None
 _finnhub_range_cached=st.cache_data(ttl=3600,show_spinner=False)(_finnhub_range_raw)
@@ -1879,12 +1899,41 @@ def score_breakdown(d):
     strength=round((comp/maxw+1)/2*100)
     return fig,comp,maxw,strength
 
+def _delta_texts(vals):
+    """Per-bar %-change vs the PREVIOUS bar -> (labels, colors). Skips undefined cases
+    (first bar, NaN, ~zero base). Negative bases use |prev| so the sign stays intuitive."""
+    labs=[""]; cols=[MUTE]
+    v=[float(x) if (x is not None and np.isfinite(x)) else np.nan for x in vals]
+    for i in range(1,len(v)):
+        p,c=v[i-1],v[i]
+        if not (np.isfinite(p) and np.isfinite(c)) or abs(p)<1e-9:
+            labs.append(""); cols.append(MUTE); continue
+        pct=(c-p)/abs(p)*100
+        labs.append(f"{pct:+.0f}%"); cols.append(GREEN if pct>=0 else RED)
+    return labs,cols
+
+def _window_delta(vals):
+    """First-valid -> last-valid % change across the displayed window (None if undefined)."""
+    v=[float(x) for x in vals if (x is not None and np.isfinite(x))]
+    if len(v)<2 or abs(v[0])<1e-9: return None
+    return (v[-1]-v[0])/abs(v[0])*100
+
 def financials_chart(df, tkr, title):
+    rev=(df["revenue"]/1e9); ni=(df["net_income"]/1e9)
+    rl,rc=_delta_texts(rev.values); nl,nc=_delta_texts(ni.values)
     fig=go.Figure()
-    fig.add_trace(go.Bar(x=df["period"],y=df["revenue"]/1e9,name="Revenue ($B)",marker_color=CYAN))
-    fig.add_trace(go.Bar(x=df["period"],y=df["net_income"]/1e9,name="Net income ($B)",marker_color=GREEN))
+    fig.add_trace(go.Bar(x=df["period"],y=rev,name="Revenue ($B)",marker_color=CYAN,
+        text=rl,textposition="outside",cliponaxis=False,textfont=dict(size=11,color=rc)))
+    fig.add_trace(go.Bar(x=df["period"],y=ni,name="Net income ($B)",marker_color=GREEN,
+        text=nl,textposition="outside",cliponaxis=False,textfont=dict(size=11,color=nc)))
+    wr,wn=_window_delta(rev.values),_window_delta(ni.values)
+    win=" · ".join(x for x in [f"Rev {wr:+.0f}%" if wr is not None else None,
+                               f"NI {wn:+.0f}%" if wn is not None else None] if x)
+    if win: title=f"{title}  ·  window: {win}"
     fig.update_layout(title=title,barmode="group")
-    return dark(fig,300)
+    fig=dark(fig,320)
+    fig.update_layout(margin=dict(t=48))   # room for the outside delta labels under the title
+    return fig
 
 def _scr_apply_preset():
     p=st.session_state.get("scr_preset","— none —")
@@ -2297,39 +2346,55 @@ tickers=tickers[:5]
 
 if tickers and (run or any(syms)):
     prog=st.progress(0.04,text="Loading market data…")    # show feedback immediately, before any network call
-    vix_series=get_vix_hist(period)
-    spy_series=get_spy(period)
-    vix_now=float(vix_series.iloc[-1]) if vix_series is not None and len(vix_series) else None
     data={}
     yrs=PERIOD_YEARS.get(period,2)
     _fkey=_finnhub_key()
     import time as _tmod; _now=_tmod.time()
     # ---- parallel RAW prefetch, cached in session_state so reruns / Randomize don't re-hit the network ----
     _store=st.session_state.setdefault("_datacache",{})
-    _need=[t for t in tickers if (lambda e:(not e) or (_now-e[0]>900))(_store.get((t,period)))]
-    if _need:
+    def _stale(key_): e=_store.get(key_); return (not e) or (_now-e[0]>900)
+    _need=[t for t in tickers if _stale((t,period))]
+    def _raw_close(sym):                                  # VIX/SPY: raw thread-safe fetch (no st.cache)
+        try:
+            v=yf.Ticker(sym).history(period=period,auto_adjust=True)
+            v=v["Close"].dropna() if (v is not None and not v.empty) else None
+            return v if (v is not None and len(v)) else None
+        except Exception: return None
+    _mkt_need=[s for s in ("^VIX","SPY") if _stale((s,period))]
+    if _need or _mkt_need:
         def _work(t): return t,_prefetch_ticker(t,period,yrs,_fkey)
         try:
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=min(8,max(1,len(_need)))) as _ex:
-                _futs=[_ex.submit(_work,t) for t in _need]
+            with ThreadPoolExecutor(max_workers=min(8,max(1,len(_need)+len(_mkt_need)))) as _ex:
+                _mf={_ex.submit(_raw_close,s):s for s in _mkt_need}   # VIX/SPY ride the same pool —
+                _futs=[_ex.submit(_work,t) for t in _need]            # they were 2 serial calls before
                 for _i,_fut in enumerate(as_completed(_futs),1):
                     _tt,_res=_fut.result(); _store[(_tt,period)]=(_now,)+_res
-                    prog.progress(_i/len(_need),text=f"Loading market data… {_i}/{len(_need)}")
+                    prog.progress(_i/max(len(_need),1),text=f"Loading market data… {_i}/{len(_need)}")
+                for _fut,_s in _mf.items():
+                    _store[(_s,period)]=(_now,_fut.result())
         except Exception:
             for _i,t in enumerate(_need,1):
                 _store[(t,period)]=(_now,)+_prefetch_ticker(t,period,yrs,_fkey)
                 prog.progress(_i/len(_need),text=f"Loading market data… {_i}/{len(_need)}")
+            for _s in _mkt_need: _store[(_s,period)]=(_now,_raw_close(_s))
     else:
         prog.progress(1.0,text="Loading market data…")
+    vix_series=(_store.get(("^VIX",period)) or (0,None))[1]
+    spy_series=(_store.get(("SPY",period)) or (0,None))[1]
+    vix_now=float(vix_series.iloc[-1]) if vix_series is not None and len(vix_series) else None
     if len(_store)>60:                                  # keep session memory bounded
         for _k in sorted(_store,key=lambda kk:_store[kk][0])[:len(_store)-60]: _store.pop(_k,None)
-    _pf={t:(lambda e:e[1:] if e else (None,{},[],"Yahoo"))(_store.get((t,period))) for t in tickers}
+    _BLANK=(None,{},[],"Yahoo",None)
+    def _unpack(e):                                     # tolerate old 4-field cache entries mid-session
+        if not e: return _BLANK
+        r=tuple(e[1:]); return r if len(r)>=5 else (r+(None,))
+    _pf={t:_unpack(_store.get((t,period))) for t in tickers}
     _acache=st.session_state.setdefault("_analysiscache",{})
     if len(_acache)>40:
         for _kk in sorted(_acache,key=lambda x:_acache[x][0][1])[:len(_acache)-40]: _acache.pop(_kk,None)
     for k,t in enumerate(tickers):
-        hist,funda0,news_items,news_src=_pf.get(t,(None,{},[],"Yahoo"))
+        hist,funda0,news_items,news_src,fin0=_pf.get(t,_BLANK)
         if hist is None or len(hist)<60:
             st.error(f"⚠️ No usable data for **{t}** — check the symbol."); continue
         _stamp=_store.get((t,period),(0,))[0]
@@ -2402,7 +2467,7 @@ if tickers and (run or any(syms)):
             vix_series=vix_series, spy_series=spy_series, news=_disp, news_src=news_src,
             news_avg=news_avg, news_vote=news_vote, scores=scores, titles=titles,
             moves=moves, news_marks=news_marks, funda=funda,
-            material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs,
+            material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs, fin=fin0,
             awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last)
         _acache[t]=(_sig,data[t])
     prog.empty()
@@ -2611,7 +2676,7 @@ if tickers and (run or any(syms)):
                                 use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
 
                 # ---- financial results (revenue & net income) ----
-                fin=get_financials(t)
+                fin=d.get("fin") or get_financials(t)   # prefetched in the parallel pool; fallback fetch
                 if fin and (fin["annual"] is not None or fin["quarterly"] is not None):
                     with st.expander("📊 Financial results — revenue & net income"):
                         if fin["annual"] is not None:

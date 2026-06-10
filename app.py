@@ -175,13 +175,19 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 /* ---- settings now live in an expander under the login, so hide the sidebar + its open pill entirely ---- */
 [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{ display:none !important; }
 [data-testid="stSidebar"]{ display:none !important; }
-/* ---- settings popover trigger: dark, readable, cyan caret; panel floats over content ---- */
-[data-testid="stPopover"] button{ background:#0d1622 !important; color:#e6edf3 !important;
-  border:1px solid rgba(255,255,255,0.18) !important; }
-[data-testid="stPopover"] button *{ color:#e6edf3 !important; }
+/* ---- settings popover trigger: NO pill — plain header-style text matching the bracket header ---- */
+[data-testid="stPopover"] button{ background:transparent !important; border:none !important;
+  box-shadow:none !important; padding:0 6px 0 0 !important; min-height:0 !important;
+  justify-content:flex-end !important; }
+[data-testid="stPopover"] button p, [data-testid="stPopover"] button div{
+  font-family:'Chakra Petch',sans-serif !important; font-weight:800 !important;
+  font-size:21px !important; color:#e6edf3 !important; letter-spacing:.01em !important; }
 [data-testid="stPopover"] button svg{ width:1.5rem !important; height:1.5rem !important;
   color:#3ec1d3 !important; fill:#3ec1d3 !important; }
-[data-testid="stPopoverBody"]{ background:#101b2b !important; border:1px solid rgba(255,255,255,0.14) !important; }
+/* the floating panel paints WHITE on an inner div — force every layer dark */
+[data-testid="stPopoverBody"], [data-baseweb="popover"] > div, [data-baseweb="popover"] > div > div{
+  background:#101b2b !important; }
+[data-testid="stPopoverBody"]{ border:1px solid rgba(255,255,255,0.14) !important; }
 /* ---- bigger fold arrow on remaining expanders (news status, combo search, filters) ---- */
 [data-testid="stExpander"] summary svg, [data-testid="stExpander"] summary [data-testid="stIconMaterial"]{
   width:1.7rem !important; height:1.7rem !important; font-size:1.7rem !important; color:#3ec1d3 !important; fill:#3ec1d3 !important; }

@@ -1331,11 +1331,13 @@ def matrix_html(dd, cc):
             f"font-family:\"IBM Plex Mono\",monospace'>"
             f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
 
-def section_header(txt, color=CYAN):
-    """A section title flanked by hard brackets, to set sections apart as their own block."""
+def section_header(txt, color=CYAN, ml=0):
+    """A section title flanked by hard brackets, to set sections apart as their own block.
+    ml = left-margin nudge (px); use a small negative value to align a column-nested header
+    flush with the input-box grid below it."""
     b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
        "font-size:27px;line-height:1'>")
-    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 9px'>{b}[</span>"
+    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 9px;margin-left:{ml}px'>{b}[</span>"
             f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
             f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
 
@@ -2138,8 +2140,8 @@ with _top_slot:
             ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
             if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
 
-_hc=st.columns([3,2],vertical_alignment="center")
-_hc[0].markdown(section_header("Enter up to 5 symbols"),unsafe_allow_html=True)
+_hc=st.columns([5,4],vertical_alignment="center")
+_hc[0].markdown(section_header("Enter up to 5 symbols", ml=-9),unsafe_allow_html=True)
 _settings_exp=_hc[1].expander("⚙ Analysis settings",expanded=False)
 with _settings_exp:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,

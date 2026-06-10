@@ -250,13 +250,19 @@ small, .stCaption, [data-testid="stCaptionContainer"]{ color:#b8c2cf !important;
 """, unsafe_allow_html=True)
 
 PLOTLY_FONT = dict(family="IBM Plex Mono, monospace", color=TXT, size=12)
+PLOTLY_CFG={"displaylogo":False,"modeBarButtonsToRemove":[
+    "select2d","lasso2d","autoScale2d","hoverClosestCartesian","hoverCompareCartesian",
+    "toggleSpikelines","pan2d","zoomIn2d","zoomOut2d",
+    "drawline","drawopenpath","drawclosedpath","drawcircle","drawrect","eraseshape"]}
+
 def dark(fig, h=420):
     fig.update_layout(height=h, template="plotly_dark", font=PLOTLY_FONT,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=8,r=8,t=34,b=8),
         legend=dict(orientation="h",y=1.08,font=dict(size=12.5,color=TXT)),
-        title_font=dict(color=TXT,size=15.5),
         hovermode="x unified")
+    if fig.layout.title and fig.layout.title.text:      # title font ONLY when a title exists —
+        fig.update_layout(title_font=dict(color=TXT,size=15.5))   # else plotly.js prints "undefined"
     fig.update_xaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color="#c7d0db"), title_font=dict(color="#c7d0db"))
     fig.update_yaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color="#c7d0db"), title_font=dict(color="#c7d0db"))
     fig.update_annotations(font_color="#c7d0db")   # subplot titles etc. were near-invisible dark gray
@@ -264,7 +270,9 @@ def dark(fig, h=420):
 
 # modebar config that turns on drawing tools (trend lines, boxes, freehand, erase)
 PLOTLY_DRAW={"displaylogo":False,"scrollZoom":True,
-    "modeBarButtonsToAdd":["drawline","drawopenpath","drawclosedpath","drawrect","drawcircle","eraseshape"]}
+    "modeBarButtonsToAdd":["drawline","drawrect","eraseshape"],   # trendline, box, eraser — enough
+    "modeBarButtonsToRemove":["select2d","lasso2d","autoScale2d","hoverClosestCartesian",
+        "hoverCompareCartesian","toggleSpikelines","zoomIn2d","zoomOut2d"]}   # mobile bar was overflowing
 # INDICATOR MATH
 # ==========================================================================
 def ema(s,n): return s.ewm(span=n,adjust=False).mean()
@@ -1668,7 +1676,10 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         fig.add_hline(y=0,line=dict(width=.7,color=MUTE,dash="dot"),row=3,col=1)
     fig.update_layout(xaxis_rangeslider_visible=False, dragmode="zoom",
         newshape=dict(line=dict(color=AMBER,width=2)))
-    return dark(fig, (860 if big else 620) if awn_hist is not None else (820 if big else 560))
+    fig=dark(fig, (860 if big else 620) if awn_hist is not None else (820 if big else 560))
+    fig.update_layout(legend=dict(orientation="h",y=-0.05,yanchor="top",x=0,
+        font=dict(size=12.5,color=TXT)), margin=dict(b=52))   # below the chart: nothing to collide with
+    return fig
 
 def strategy_positions(d, strategy, buy_th=72, sell_th=42):
     """Build a raw long(1)/flat(0) position series for the chosen backtest strategy."""
@@ -2825,7 +2836,7 @@ if tickers and (run or any(syms)):
         choice=pick_indicator()
         st.markdown(f"##### 🔍 {choice}")
         st.caption("Tap a ticker in the legend to show/hide that stock.")
-        st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)
+        st.plotly_chart(overlay_indicator(choice,data),use_container_width=True,config=PLOTLY_CFG)
 
         # PER-STOCK PRICE + SIGNALS
         st.markdown(section_header("Price & historical signals",rule=True),unsafe_allow_html=True)
@@ -2944,7 +2955,7 @@ if tickers and (run or any(syms)):
                 st.markdown(f"##### 📉 Backtest — {strat_name} vs buy &amp; hold")
                 st.caption(rule, unsafe_allow_html=True)
                 bt=backtest(d["o"],pos,cost=bt_cost)
-                st.plotly_chart(equity_chart(bt,t,label=strat_name,accent=acc),use_container_width=True,key=f"eq_{t}")
+                st.plotly_chart(equity_chart(bt,t,label=strat_name,accent=acc),use_container_width=True,key=f"eq_{t}",config=PLOTLY_CFG)
                 edge=bt["strat_ret"]-bt["bh_ret"]
                 r1=st.columns(3)
                 r1[0].metric("Strategy return",f"{bt['strat_ret']:+.1f}%",f"{edge:+.1f}% vs buy & hold")

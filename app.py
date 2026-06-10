@@ -175,7 +175,14 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 /* ---- settings now live in an expander under the login, so hide the sidebar + its open pill entirely ---- */
 [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{ display:none !important; }
 [data-testid="stSidebar"]{ display:none !important; }
-/* ---- settings expander: bigger fold/unfold arrow so it's obvious it collapses ---- */
+/* ---- settings popover trigger: dark, readable, cyan caret; panel floats over content ---- */
+[data-testid="stPopover"] button{ background:#0d1622 !important; color:#e6edf3 !important;
+  border:1px solid rgba(255,255,255,0.18) !important; }
+[data-testid="stPopover"] button *{ color:#e6edf3 !important; }
+[data-testid="stPopover"] button svg{ width:1.5rem !important; height:1.5rem !important;
+  color:#3ec1d3 !important; fill:#3ec1d3 !important; }
+[data-testid="stPopoverBody"]{ background:#101b2b !important; border:1px solid rgba(255,255,255,0.14) !important; }
+/* ---- bigger fold arrow on remaining expanders (news status, combo search, filters) ---- */
 [data-testid="stExpander"] summary svg, [data-testid="stExpander"] summary [data-testid="stIconMaterial"]{
   width:1.7rem !important; height:1.7rem !important; font-size:1.7rem !important; color:#3ec1d3 !important; fill:#3ec1d3 !important; }
 /* ---- kill the white Streamlit header strip + colored decoration; pull the page content up ---- */
@@ -1331,13 +1338,12 @@ def matrix_html(dd, cc):
             f"font-family:\"IBM Plex Mono\",monospace'>"
             f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
 
-def section_header(txt, color=CYAN, ml=0):
+def section_header(txt, color=CYAN, ml=0, mb=9):
     """A section title flanked by hard brackets, to set sections apart as their own block.
-    ml = left-margin nudge (px); use a small negative value to align a column-nested header
-    flush with the input-box grid below it."""
+    ml = left-margin nudge (px) for column-nested headers; mb = bottom margin (px)."""
     b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
        "font-size:27px;line-height:1'>")
-    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 9px;margin-left:{ml}px'>{b}[</span>"
+    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 {mb}px;margin-left:{ml}px'>{b}[</span>"
             f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
             f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
 
@@ -2140,9 +2146,9 @@ with _top_slot:
             ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
             if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
 
-_hc=st.columns([5,4],vertical_alignment="center")
-_hc[0].markdown(section_header("Enter up to 5 symbols", ml=-9),unsafe_allow_html=True)
-_settings_exp=_hc[1].expander("⚙ Analysis settings",expanded=False)
+_hc=st.columns([5,4],vertical_alignment="bottom")
+_hc[0].markdown(section_header("Enter up to 5 symbols", ml=-9, mb=2),unsafe_allow_html=True)
+_settings_exp=_hc[1].popover("⚙ Analysis settings",use_container_width=True)
 with _settings_exp:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")

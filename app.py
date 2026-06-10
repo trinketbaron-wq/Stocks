@@ -65,12 +65,15 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] summary{{ color:{TXT
 html,body,[class*="css"] {{ font-family:'IBM Plex Mono',monospace; }}
 h1,h2,h3,h4,.deck-tkr {{ font-family:'Chakra Petch',sans-serif; letter-spacing:.02em; }}
 /* hero */
-.hero {{ position:relative; padding:22px 26px; border-radius:16px; overflow:hidden;
-    border:1px solid rgba(255,255,255,0.08);
-    background:linear-gradient(120deg,#0d1420 0%,#101b2b 50%,#0c1622 100%); margin-bottom:6px; }}
+.hero {{ position:relative; padding:8px 10px 11px; overflow:hidden; border-bottom:none;
+    border-top:1px solid rgba(255,255,255,0.08); border-left:1px solid rgba(255,255,255,0.08);
+    border-right:1px solid rgba(255,255,255,0.08);
+    background:linear-gradient(120deg,#0d1420 0%,#101b2b 50%,#0c1622 100%); margin-bottom:4px; }}
 .hero:before {{ content:""; position:absolute; inset:0;
     background:repeating-linear-gradient(0deg,transparent 0 22px,rgba(255,255,255,0.025) 22px 23px);
     pointer-events:none; }}
+.hero:after {{ content:""; position:absolute; left:0; right:0; bottom:0; height:2px;
+    background:linear-gradient(90deg,{GREEN},{CYAN} 55%,{AMBER}); }}
 .hero h1 {{ margin:0; font-size:38px; font-weight:700;
     background:linear-gradient(90deg,{GREEN},{CYAN} 60%,{AMBER});
     -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }}
@@ -172,6 +175,9 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 /* ---- settings now live in an expander under the login, so hide the sidebar + its open pill entirely ---- */
 [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{ display:none !important; }
 [data-testid="stSidebar"]{ display:none !important; }
+/* ---- settings expander: bigger fold/unfold arrow so it's obvious it collapses ---- */
+[data-testid="stExpander"] summary svg, [data-testid="stExpander"] summary [data-testid="stIconMaterial"]{
+  width:1.7rem !important; height:1.7rem !important; font-size:1.7rem !important; color:#3ec1d3 !important; fill:#3ec1d3 !important; }
 /* ---- kill the white Streamlit header strip + colored decoration; pull the page content up ---- */
 [data-testid="stHeader"]{ background:transparent !important; }
 [data-testid="stDecoration"]{ display:none !important; }
@@ -230,10 +236,13 @@ PLOTLY_FONT = dict(family="IBM Plex Mono, monospace", color=TXT, size=12)
 def dark(fig, h=420):
     fig.update_layout(height=h, template="plotly_dark", font=PLOTLY_FONT,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=8,r=8,t=34,b=8), legend=dict(orientation="h",y=1.08,font=dict(size=11)),
+        margin=dict(l=8,r=8,t=34,b=8),
+        legend=dict(orientation="h",y=1.08,font=dict(size=12.5,color=TXT)),
+        title_font=dict(color=TXT,size=15.5),
         hovermode="x unified")
-    fig.update_xaxes(gridcolor=GRID, zeroline=False)
-    fig.update_yaxes(gridcolor=GRID, zeroline=False)
+    fig.update_xaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color="#c7d0db"), title_font=dict(color="#c7d0db"))
+    fig.update_yaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color="#c7d0db"), title_font=dict(color="#c7d0db"))
+    fig.update_annotations(font_color="#c7d0db")   # subplot titles etc. were near-invisible dark gray
     return fig
 
 # modebar config that turns on drawing tools (trend lines, boxes, freehand, erase)
@@ -1326,7 +1335,7 @@ def section_header(txt, color=CYAN):
     """A section title flanked by hard brackets, to set sections apart as their own block."""
     b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
        "font-size:27px;line-height:1'>")
-    return (f"<div style='display:flex;align-items:center;gap:9px;margin:22px 0 10px'>{b}[</span>"
+    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 9px'>{b}[</span>"
             f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
             f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
 
@@ -1392,7 +1401,10 @@ def overlay_indicator(name, data):
         ts=list(data.keys()); vals=[data[t]["news_avg"] for t in ts]
         cols=[_cmap[t] for t in ts]
         fig.add_trace(go.Bar(x=ts,y=vals,marker_color=cols)); title="News sentiment (current) — above 0 = positive, below = negative"
-    fig.update_layout(title=title, showlegend=False)
+    for _tr in fig.data:                       # color each legend entry in its stock's color (still tap-toggles)
+        if _tr.name in _cmap: _tr.name=f"<span style='color:{_cmap[_tr.name]}'>{_tr.name}</span>"
+    fig.update_layout(title=title, showlegend=True,
+        legend=dict(orientation="h",y=1.10,font=dict(size=14,color=TXT),itemsizing="constant"))
     return dark(fig, 380)
 
 def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None):
@@ -2013,10 +2025,9 @@ def pick_indicator():
 # ==========================================================================
 # UI
 # ==========================================================================
-_top_slot=st.container()   # account/login strip pinned to the very top (filled once auth fns exist)
 st.markdown("""
 <div class="hero">
-<svg viewBox="0 0 460 124" style="width:100%;max-width:520px;height:auto;display:block" role="img" aria-label="AlphaWire">
+<svg viewBox="0 0 460 96" style="width:100%;max-width:500px;height:auto;display:block" role="img" aria-label="AlphaWire">
   <defs>
     <linearGradient id="awg" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#16c784"/>
@@ -2028,13 +2039,6 @@ st.markdown("""
       <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
-  <line x1="20" y1="112" x2="440" y2="112" stroke="rgba(62,193,211,0.22)" stroke-width="1.4"/>
-  <line x1="20" y1="112" x2="440" y2="112" stroke="url(#awg)" stroke-width="1.4"
-        stroke-dasharray="6 10" class="aw-dash"/>
-  <circle r="3.4" fill="#16c784" filter="url(#awglow)" cy="112">
-    <animate attributeName="cx" values="20;440" dur="3.2s" repeatCount="indefinite"/>
-    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="3.2s" repeatCount="indefinite"/>
-  </circle>
   <g filter="url(#awglow)">
     <circle cx="54" cy="50" r="32" fill="#0d1622" stroke="url(#awg)" stroke-width="2.4"/>
   </g>
@@ -2048,12 +2052,9 @@ st.markdown("""
         fill="#7d8694" letter-spacing="1.6">COMPOSITE BUY / SELL SIGNAL ENGINE</text>
 </svg>
 </div>
-<style>
-.aw-dash{animation:awflow 1.1s linear infinite}
-@keyframes awflow{to{stroke-dashoffset:-16}}
-</style>
 """, unsafe_allow_html=True)
 
+_top_slot=st.container()   # account/login strip + settings, rendered just BELOW the hero logo
 api_key=st.secrets.get("ANTHROPIC_API_KEY",None)
 _has_finnhub=bool(_finnhub_key())
 
@@ -2122,7 +2123,6 @@ with _top_slot:
         _ap=_lc[1].text_input("Password",type="password",key="auth_p",label_visibility="collapsed",placeholder="Password")
         _login_clk=_lc[2].button("Log in",use_container_width=True,key="auth_login")
         _reg_clk=_lc[3].button("Register",use_container_width=True,key="auth_reg")
-        st.caption("Optional — saves your watchlist & Alphawire rules. Resets on reboot (free tier).")
         if _login_clk:
             if verify_user(_au,_ap):
                 u=_au.strip().lower(); st.session_state["user"]=u
@@ -2213,7 +2213,7 @@ with _settings_exp:
                 except Exception as _e:
                     st.error(f"Request failed ({type(_e).__name__}) — the host may be blocking outbound calls.")
 
-st.markdown("##### Enter up to 5 symbols")
+st.markdown(section_header("Enter up to 5 symbols"),unsafe_allow_html=True)
 def _merge_slots(cur, picks, mode):
     """Values for the 5 ticker boxes when loading picks. mode 'append' keeps already-filled boxes
     and drops new picks into the free ones; 'replace' starts fresh. Deduped (case-insensitive), cap 5."""
@@ -2262,8 +2262,6 @@ if b4.button("🔄 Randomize",use_container_width=True,help="Drop a fresh set of
     import random as _rnd
     st.session_state["_load_syms"]=_rnd.sample(DEFAULT_POOL,5); st.session_state["_load_mode"]="replace"
     st.rerun()
-st.caption("Opens with a fresh set of 5 — hit **🔄 Randomize** for new ones, or **🔎 Screener** to find & add names. "
-           "**💾 Save** stores your set in the page link, so bookmarking the page brings it back.")
 
 tickers=[]
 for s in syms:
@@ -2475,7 +2473,7 @@ if tickers and (run or any(syms)):
                                 st.session_state[f"optres_asof_{t}"]=str(d["o"].index[-1])[:10]
                             st.rerun()
                 st.markdown(f"<div style='border-top:2px dotted {TAB_PALETTE[_ci%len(TAB_PALETTE)]};"
-                            f"margin:4px 1px 0;opacity:.85'></div>",unsafe_allow_html=True)
+                            f"margin:2px 1px 0;opacity:.85'></div>",unsafe_allow_html=True)
 
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
         st.markdown(section_header("Indicator matrix"),unsafe_allow_html=True)
@@ -2483,7 +2481,7 @@ if tickers and (run or any(syms)):
         st.markdown(matrix_html(dd,cc),unsafe_allow_html=True)
         choice=pick_indicator()
         st.markdown(f"##### 🔍 {choice}")
-        st.markdown(overview_legend_html(data),unsafe_allow_html=True)
+        st.caption("Tap a ticker in the legend to show/hide that stock.")
         st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)
 
         # PER-STOCK PRICE + SIGNALS

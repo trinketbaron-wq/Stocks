@@ -2137,8 +2137,10 @@ with _top_slot:
         if _reg_clk:
             ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
             if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
-    _settings_exp=st.expander("⚙ Analysis settings",expanded=False)   # settings live HERE, right after login
 
+_hc=st.columns([3,2],vertical_alignment="center")
+_hc[0].markdown(section_header("Enter up to 5 symbols"),unsafe_allow_html=True)
+_settings_exp=_hc[1].expander("⚙ Analysis settings",expanded=False)
 with _settings_exp:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
         help="How far back to pull prices. 5y+ recommended — a few months can't reveal anything on a stock that only trends up.")
@@ -2213,7 +2215,6 @@ with _settings_exp:
                 except Exception as _e:
                     st.error(f"Request failed ({type(_e).__name__}) — the host may be blocking outbound calls.")
 
-st.markdown(section_header("Enter up to 5 symbols"),unsafe_allow_html=True)
 def _merge_slots(cur, picks, mode):
     """Values for the 5 ticker boxes when loading picks. mode 'append' keeps already-filled boxes
     and drops new picks into the free ones; 'replace' starts fresh. Deduped (case-insensitive), cap 5."""

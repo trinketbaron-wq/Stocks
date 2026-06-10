@@ -2117,12 +2117,11 @@ with _top_slot:
         if _ar[2].button("Log out",use_container_width=True,key="acct_logout"):
             st.session_state.pop("user",None); st.rerun()
     else:
-        _lc=st.columns(2)
+        _lc=st.columns([3,3,2,2],vertical_alignment="bottom")
         _au=_lc[0].text_input("Username",key="auth_u",label_visibility="collapsed",placeholder="Username")
         _ap=_lc[1].text_input("Password",type="password",key="auth_p",label_visibility="collapsed",placeholder="Password")
-        _bc=st.columns(2)
-        _login_clk=_bc[0].button("Log in",use_container_width=True,key="auth_login")
-        _reg_clk=_bc[1].button("Register",use_container_width=True,key="auth_reg")
+        _login_clk=_lc[2].button("Log in",use_container_width=True,key="auth_login")
+        _reg_clk=_lc[3].button("Register",use_container_width=True,key="auth_reg")
         st.caption("Optional — saves your watchlist & Alphawire rules. Resets on reboot (free tier).")
         if _login_clk:
             if verify_user(_au,_ap):

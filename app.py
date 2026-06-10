@@ -312,6 +312,12 @@ def enrich(df):
     o["AroonOsc"]=o["AroonUp"]-o["AroonDn"]                    # Aroon oscillator (-100..100)
     o["Hi252"]=c.rolling(252,min_periods=20).max(); o["Lo252"]=c.rolling(252,min_periods=20).min()
     o["RangePos"]=(c-o["Lo252"])/(o["Hi252"]-o["Lo252"]).replace(0,np.nan)  # 52w range position 0..1
+    try:    # weekly multi-timeframe gate: EMA10w vs EMA40w (~50d/200d), mapped back onto daily bars
+        wc=c.resample("W-FRI").last().dropna()
+        wsp=(wc.ewm(span=10,adjust=False).mean()/wc.ewm(span=40,adjust=False).mean()-1)
+        o["WkSpread"]=wsp.reindex(o.index,method="ffill")
+    except Exception:
+        o["WkSpread"]=0.0
     return o
 
 # ---- composite weighting (tunable: how much each indicator moves the score) ----
@@ -319,7 +325,7 @@ def enrich(df):
 WEIGHTS={"trend20":1.0,"trend50":1.25,"trend200":1.5,"cross":1.5,"ema50_slope":1.25,
          "macd_zero":1.0,"macd":1.25,"di":1.25,"aroon":1.0,"roc":1.25,
          "rsi":1.0,"stoch":1.0,"mfi":1.0,"williams":0.75,"cci":0.75,"boll":1.0,
-         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"awn":0.75}
+         "obv":1.0,"rs":1.5,"range52":1.0,"vix":1.0,"weekly":1.0,"awn":0.75}
 BUY_TH=0.18   # net bullish fraction (of max weight) needed to flip BUY / SELL (softer graded inputs)
 
 def signal_frame(o, vix_aligned=None, spy_aligned=None):
@@ -349,6 +355,8 @@ def signal_frame(o, vix_aligned=None, spy_aligned=None):
     V["cci"]=_g(-o.CCI, 110)
     V["boll"]=_g(0.5-o.PctB, 0.32)
     V["range52"]=_g(o.RangePos-0.5, 0.30)
+    # weekly multi-timeframe confirmation: daily bullishness without the weekly regime gets dragged
+    V["weekly"]=_g(o.WkSpread if "WkSpread" in o else 0.0, 0.05)
     # volume
     obv_sl=o.OBV-o.OBV.shift(20)
     obv_dn=(o.OBV.diff().abs().rolling(60).mean()*20).replace(0,np.nan)
@@ -535,6 +543,35 @@ def get_company_news(t, period_years=1):
            "when":n.get("when",""),"dt":0,"summary":""} for n in yh]
     return norm,"Yahoo"
 
+def _next_earnings_raw(t, key, tk=None):
+    """Next earnings date 'YYYY-MM-DD' (Finnhub calendar; Yahoo fallback) or None."""
+    import datetime as _dt
+    today=_dt.date.today()
+    if key:
+        try:
+            import requests
+            r=requests.get("https://finnhub.io/api/v1/calendar/earnings",
+                params={"from":str(today),"to":str(today+_dt.timedelta(days=120)),"symbol":t,"token":key},timeout=10)
+            if r.status_code==200:
+                ds=sorted(e.get("date") for e in (r.json() or {}).get("earningsCalendar",[]) if e.get("date"))
+                ds=[x for x in ds if x>=str(today)]
+                if ds: return ds[0]
+        except Exception: pass
+    try:                                          # Yahoo fallback — calendar shape varies by version
+        cal=(tk or yf.Ticker(t)).calendar
+        raw=None
+        if isinstance(cal,dict): raw=cal.get("Earnings Date") or cal.get("EarningsDate")
+        elif cal is not None and hasattr(cal,"loc"):
+            try: raw=cal.loc["Earnings Date"].tolist()
+            except Exception: raw=None
+        if raw:
+            if not isinstance(raw,(list,tuple)): raw=[raw]
+            ds=sorted(str(pd.Timestamp(x).date()) for x in raw if x is not None)
+            ds=[x for x in ds if x>=str(today)]
+            if ds: return ds[0]
+    except Exception: pass
+    return None
+
 def _prefetch_ticker(t, period, yrs, key):
     """Raw, thread-safe fetch (no st.cache_data / no ScriptRunContext needed): price + fundamentals
     + news + financial statements. Mirrors the screener's parallel pattern; the caller caches results
@@ -553,6 +590,8 @@ def _prefetch_ticker(t, period, yrs, key):
     if h is not None and len(h)>=60:
         try: fu=dict(_fundamentals_fast(t, key))
         except Exception: fu={}
+        try: fu["next_earnings"]=_next_earnings_raw(t, key, tk)
+        except Exception: pass
         try:                                     # income statements fetched HERE, in the parallel pool —
             fin={"annual":_extract_fin(tk.income_stmt),          # they were the slowest SERIAL step,
                  "quarterly":_extract_fin(tk.quarterly_income_stmt)}   # paid per-tab at render time
@@ -1252,6 +1291,85 @@ SCREEN_PRESETS={
 # ==========================================================================
 def verdict_color(state): return {"BUY":GREEN,"SELL":RED}.get(state,AMBER)
 
+def position_size(price, atr_pct, account, risk_pct, k_atr):
+    """ATR-based sizing: stop k×ATR below entry; shares so a stop-out loses risk_pct of account."""
+    try:
+        price=float(price); dist=price*float(atr_pct)/100.0*float(k_atr)
+        risk=float(account)*float(risk_pct)/100.0
+        if not (price>0 and dist>0 and risk>0): return None
+        sh=int(risk//dist)
+        return dict(stop=price-dist,dist=dist,risk=risk,shares=sh,cost=sh*price,
+                    pct_of_acct=(sh*price/float(account)*100 if account else 0.0))
+    except Exception:
+        return None
+
+def portfolio_rows(data, holdings):
+    """holdings: {tkr:{'sh':float,'bc':float}} -> (rows, totals) for positions with shares>0."""
+    rows=[]; tv=0.0; tc=0.0; wr=0.0
+    for t,d in data.items():
+        h=holdings.get(t) or {}
+        sh=float(h.get("sh") or 0); bc=float(h.get("bc") or 0)
+        pr=d.get("funda",{}).get("price")
+        if sh<=0 or pr is None: continue
+        val=sh*pr; cost=sh*bc; pl=val-cost
+        rows.append(dict(t=t,sh=sh,bc=bc,pr=pr,val=val,pl=pl,
+                         plpct=(pl/cost*100 if cost>0 else None),
+                         rank=int(d.get("strength",0)),verdict=d.get("state","HOLD")))
+        tv+=val; tc+=cost; wr+=int(d.get("strength",0))*val
+    for r in rows: r["wt"]=(r["val"]/tv*100 if tv>0 else 0.0)
+    totals=dict(value=tv,cost=tc,pl=tv-tc,plpct=((tv-tc)/tc*100 if tc>0 else None),
+                wrank=(wr/tv if tv>0 else None),
+                drag=(min(rows,key=lambda r:r["pl"])["t"] if rows else None))
+    return rows,totals
+
+def portfolio_html(rows, totals):
+    TD=f"padding:6px 9px;border-bottom:1px solid {GRID};font-family:'IBM Plex Mono',monospace;font-size:12px"
+    TH=f"padding:7px 9px;color:{TXT};font-size:10px;letter-spacing:.05em;text-align:right;border-bottom:1px solid {GRID}"
+    body=[]
+    for r in rows:
+        pc=GREEN if r["pl"]>=0 else RED
+        vd=verdict_color(r["verdict"]); drag=(r["t"]==totals.get("drag") and r["pl"]<0)
+        body.append(
+            f"<tr><td style='{TD};color:{TXT};text-align:left;font-weight:700'>{r['t']}"
+            f"{' <span style=color:'+RED+';font-size:10px>⬇ drag</span>' if drag else ''}</td>"
+            f"<td style='{TD};color:{MUTE};text-align:right'>{r['sh']:,.0f}</td>"
+            f"<td style='{TD};color:{MUTE};text-align:right'>${r['bc']:,.2f}</td>"
+            f"<td style='{TD};color:{TXT};text-align:right'>${r['pr']:,.2f}</td>"
+            f"<td style='{TD};color:{TXT};text-align:right'>${r['val']:,.0f}</td>"
+            f"<td style='{TD};color:{pc};text-align:right;font-weight:700'>{r['pl']:+,.0f}"
+            f"{('  ('+format(r['plpct'],'+.1f')+'%)') if r['plpct'] is not None else ''}</td>"
+            f"<td style='{TD};color:{MUTE};text-align:right'>{r['wt']:.0f}%</td>"
+            f"<td style='{TD};color:{vd};text-align:right;font-weight:700'>{r['rank']} · {r['verdict']}</td></tr>")
+    tpl=totals; pc=GREEN if tpl["pl"]>=0 else RED
+    foot=(f"<tr><td style='{TD};color:{CYAN};text-align:left;font-weight:800'>TOTAL</td>"
+          f"<td style='{TD}'></td><td style='{TD}'></td><td style='{TD}'></td>"
+          f"<td style='{TD};color:{TXT};text-align:right;font-weight:800'>${tpl['value']:,.0f}</td>"
+          f"<td style='{TD};color:{pc};text-align:right;font-weight:800'>{tpl['pl']:+,.0f}"
+          f"{('  ('+format(tpl['plpct'],'+.1f')+'%)') if tpl['plpct'] is not None else ''}</td>"
+          f"<td style='{TD}'></td>"
+          f"<td style='{TD};color:{CYAN};text-align:right;font-weight:800'>"
+          f"{('w-rank '+format(tpl['wrank'],'.0f')) if tpl['wrank'] is not None else ''}</td></tr>")
+    head=(f"<tr><th style='{TH};text-align:left'>POSITION</th><th style='{TH}'>SHARES</th>"
+          f"<th style='{TH}'>BOOK</th><th style='{TH}'>LAST</th><th style='{TH}'>VALUE</th>"
+          f"<th style='{TH}'>P&amp;L</th><th style='{TH}'>WT</th><th style='{TH}'>ALPHARANK</th></tr>")
+    return (f"<div style='overflow:auto;border:1px solid {GRID};border-radius:10px'>"
+            f"<table style='width:100%;border-collapse:collapse;background:{BG}'>"
+            f"{head}{''.join(body)}{foot}</table></div>")
+
+def digest_changes(prev, cur):
+    """Diff two snapshots {t:{'rank':int,'verdict':str}} -> list of (text, color) change lines."""
+    out=[]
+    for t,c in cur.items():
+        p=(prev or {}).get(t)
+        if not p: continue
+        if p.get("verdict")!=c.get("verdict"):
+            col=verdict_color(c["verdict"])
+            out.append((f"{t}: verdict {p.get('verdict')} → {c['verdict']}",col))
+        dr=int(c.get("rank",0))-int(p.get("rank",0))
+        if abs(dr)>=8:
+            out.append((f"{t}: AlphaRank {p.get('rank')} → {c.get('rank')} ({dr:+d})",GREEN if dr>0 else RED))
+    return out
+
 def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
     vc=funda.get("vol_chg")
     voltxt="—" if vc is None else f"{'▲' if vc>=0 else '▼'} {abs(vc):.0f}%"
@@ -1268,6 +1386,18 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
         priceline=(f"<div class='cardsub' style='font-family:\"IBM Plex Mono\",monospace;"
                    f"font-size:18px;color:{TXT};margin:2px 0 4px'>${pr:,.2f}{chgtxt}</div>")
     col=verdict_color(state)
+    _eps=""
+    _ned=funda.get("next_earnings")
+    if _ned:
+        try:
+            import datetime as _dt
+            _days=(_dt.date.fromisoformat(str(_ned)[:10])-_dt.date.today()).days
+            if 0<=_days<=14:   # technicals are least reliable straight into a print
+                _ec=AMBER if _days<=7 else MUTE
+                _eps=(f"<span style='border:1px solid {_ec};color:{_ec};border-radius:8px;"
+                      f"padding:1px 7px;font-size:10.5px;font-weight:700;margin-left:6px;"
+                      f"vertical-align:middle'>⚠ EPS {'today' if _days==0 else f'in {_days}d'}</span>")
+        except Exception: _eps=""
     _bar=(f'<div style="position:absolute;top:0;left:0;right:0;height:6px;background:{accent};'
           f'border-radius:14px 14px 0 0"></div>') if accent else ""
     if bespoke:
@@ -1279,7 +1409,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
         oo_tag=("beat B&amp;H out-of-sample" if bespoke["beat"] else "did NOT beat B&amp;H out-of-sample")
         return f"""<div class="card" style="border-color:{AMBER}66">{_bar}
       <span class="deck-tkr">{tkr}</span>
-      <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
+      <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>{_eps}
       {priceline}
       <div class="lab">AlphaRank</div>
       <div class="num" style="color:{col}">{int(strength)}<span style="font-size:16px;color:{MUTE}">/100</span></div>
@@ -1293,7 +1423,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
     </div>"""
     return f"""<div class="card">{_bar}
       <span class="deck-tkr">{tkr}</span>
-      <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>
+      <span class="verdict" style="background:{col}22;color:{col};border:1px solid {col}66">{state}</span>{_eps}
       {priceline}
       <div class="lab">AlphaRank</div>
       <div class="num" style="color:{col}">{int(strength)}<span style="font-size:16px;color:{MUTE}">/100</span></div>
@@ -1303,6 +1433,7 @@ def score_card(tkr,strength,state,funda,bespoke=None,accent=None):
 
 INDICATORS=["VERDICT","ALPHARANK","TREND","EMA 50/200","RSI","MACD","STOCH %K",
             "BOLLINGER","MFI","REL STR","OBV","ADX","ATR %","VIX","AW NEWS"]
+INDICATORS.insert(INDICATORS.index("RSI"),"WEEKLY")
 
 def matrix(data):
     """data: {tkr: dict(...)} -> (disp_df, color_df) using the latest votes."""
@@ -1318,6 +1449,8 @@ def matrix(data):
         rows["TREND"]=("▲ up" if tr>0 else "▼ down" if tr<0 else "~ mixed",
                        GREEN if tr>0 else RED if tr<0 else MUTE)
         rows["EMA 50/200"]=cell("golden" if v["cross"]>0 else "death", v["cross"])
+        _wk=float(v.get("weekly",0))
+        rows["WEEKLY"]=cell("▲ bull" if _wk>0.05 else "▼ bear" if _wk<-0.05 else "~ flat", _wk if abs(_wk)>0.05 else 0)
         rows["RSI"]=cell(f"{o.RSI:.0f}", v["rsi"])
         rows["MACD"]=cell(f"{'▲' if v['macd']>0 else '▼'} {o.MACD_hist:+.2f}", v["macd"])
         rows["STOCH %K"]=cell(f"{o.Stoch_K:.0f}", v["stoch"])
@@ -1375,12 +1508,14 @@ def matrix_html(dd, cc):
             f"font-family:\"IBM Plex Mono\",monospace'>"
             f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
 
-def section_header(txt, color=CYAN, ml=0, mb=9, mt=13):
+def section_header(txt, color=CYAN, ml=0, mb=9, mt=13, rule=False):
     """A section title flanked by hard brackets, to set sections apart as their own block.
-    ml = left nudge (px); mb/mt = bottom/top margins (px)."""
+    ml = left nudge (px); mb/mt = bottom/top margins (px); rule=True draws a full-width dotted
+    divider ABOVE the header so major sections are visibly demarcated."""
     b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
        "font-size:27px;line-height:1'>")
-    return (f"<div style='display:flex;align-items:center;gap:9px;margin:{mt}px 0 {mb}px;margin-left:{ml}px'>{b}[</span>"
+    rl=(f"<div style='border-top:2px dotted {_rgba(color,0.45)};margin:20px 0 12px'></div>" if rule else "")
+    return (rl+f"<div style='display:flex;align-items:center;gap:9px;margin:{mt}px 0 {mb}px;margin-left:{ml}px'>{b}[</span>"
             f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
             f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
 
@@ -1437,6 +1572,12 @@ def overlay_indicator(name, data):
             s=d["o"].Close.tail(180); s=s/s.iloc[0]*100
             fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.6,color=_cmap[t])))
         title="Price rebased to 100 (relative trend)"
+    elif name=="WEEKLY":
+        for t,d in data.items():
+            s=(d["o"].WkSpread*100).tail(180)
+            fig.add_trace(go.Scatter(x=s.index,y=s,name=t,mode="lines",line=dict(width=1.7,color=_cmap[t])))
+        fig.add_hline(y=0,line=dict(dash="dash",width=.7,color=CYAN))
+        title="Weekly EMA10/40 spread % — above 0 = weekly uptrend confirms"
     elif name=="VIX":
         vs=data[next(iter(data))]["vix_series"]
         if vs is not None:
@@ -1452,7 +1593,7 @@ def overlay_indicator(name, data):
         legend=dict(orientation="h",y=1.10,font=dict(size=14,color=TXT),itemsizing="constant"))
     return dark(fig, 380)
 
-def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None):
+def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=None, fib=False, style="candles", trade_pos=None, awn_hist=None):
     d=o if trade_pos is not None else o.tail(180)   # match the backtest window when showing trades
     if trade_pos is not None:
         buys,sells=trade_markers(trade_pos); idx=trade_pos.index   # actual backtested trades
@@ -1460,8 +1601,11 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
         buys,sells=alternating_signals(state_series); idx=state_series.index
     bi=[i for i in buys if idx[i] in d.index]
     si=[i for i in sells if idx[i] in d.index]
-    fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.07,row_heights=[0.7,0.3],
-                      subplot_titles=("","AlphaRank (0–100)"))
+    _rows=3 if awn_hist is not None else 2
+    fig=make_subplots(rows=_rows,cols=1,shared_xaxes=True,vertical_spacing=0.06,
+                      row_heights=([0.60,0.22,0.18] if _rows==3 else [0.7,0.3]),
+                      subplot_titles=(("","AlphaRank (0–100)","AlphaWire News (−100…+100)") if _rows==3
+                                      else ("","AlphaRank (0–100)")))
     # price drawn as BOTH candles and a line — turn either on/off straight from the legend (no sidebar setting)
     fig.add_trace(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close,
         name="candles",increasing_line_color=GREEN,decreasing_line_color=RED,
@@ -1517,9 +1661,14 @@ def price_signals(o, state_series, strength_series, tkr, big=False, news_marks=N
     s4=strength_series.reindex(d.index)
     fig.add_trace(go.Scatter(x=s4.index,y=s4,name="AlphaRank",
         line=dict(width=1.4,color=CYAN),fill="tozeroy",fillcolor="rgba(62,193,211,0.08)"),row=2,col=1)
+    if awn_hist is not None:   # when sentiment TURNED, not just where it sits now
+        a4=awn_hist.reindex(d.index)
+        fig.add_trace(go.Scatter(x=a4.index,y=a4,name="AWN",
+            line=dict(width=1.3,color=AMBER),fill="tozeroy",fillcolor="rgba(245,166,35,0.07)"),row=3,col=1)
+        fig.add_hline(y=0,line=dict(width=.7,color=MUTE,dash="dot"),row=3,col=1)
     fig.update_layout(xaxis_rangeslider_visible=False, dragmode="zoom",
         newshape=dict(line=dict(color=AMBER,width=2)))
-    return dark(fig, 820 if big else 560)
+    return dark(fig, (860 if big else 620) if awn_hist is not None else (820 if big else 560))
 
 def strategy_positions(d, strategy, buy_th=72, sell_th=42):
     """Build a raw long(1)/flat(0) position series for the chosen backtest strategy."""
@@ -1817,7 +1966,33 @@ def optimize_combo_for_ticker(d, split_frac=0.7, cost=0.001, top_k=10, triples=T
         if r["label"] not in seen or r["train_ret"]>seen[r["label"]]["train_ret"]: seen[r["label"]]=r
     rows=sorted(seen.values(),key=lambda r:r["train_ret"],reverse=True)
     best=rows[0] if rows else None
-    return dict(rows=rows,best=best,k=k,n=n,n_tested=len(cand),
+    # ---- walk-forward: expanding-window folds. In each fold we RE-SELECT the best-by-train rule
+    # using only data before the fold, then test it on the fold's unseen segment. Reports (a) how
+    # often that honest pick beats B&H out-of-sample and (b) how often it's the SAME rule (stability).
+    wf=None
+    try:
+        ser_by={}
+        for r in rows[:40]:                      # walk the top de-duped rules (selection universe)
+            ser_by[r["label"]]=combo_series(o,r["spec"],awn)
+        edges=[f for f in (0.40,0.55,0.70,0.85,1.00) if int(n*f)>=120]
+        ks=[int(n*f) for f in edges]
+        folds=[(ks[i],ks[i+1]) for i in range(len(ks)-1) if ks[i+1]-ks[i]>=60]
+        if len(folds)>=2 and ser_by:
+            picks=[];beats=[]
+            for a,b in folds:
+                tro,teo=o.iloc[:a],o.iloc[a:b]
+                pick,ptr=None,-1e9
+                for lab,ser in ser_by.items():
+                    trr=backtest(tro,ser.iloc[:a],cost=cost)["strat_ret"]
+                    if trr>ptr: ptr,pick=trr,lab
+                bt=backtest(teo,ser_by[pick].iloc[a:b],cost=cost)
+                picks.append(pick); beats.append(bt["strat_ret"]>bt["bh_ret"])
+            from collections import Counter as _Ctr
+            _mc=_Ctr(picks).most_common(1)[0]
+            wf=dict(folds=len(folds),beat=int(sum(beats)),stable=int(_mc[1]),stable_label=_mc[0],picks=picks)
+    except Exception:
+        wf=None
+    return dict(rows=rows,best=best,k=k,n=n,n_tested=len(cand),wf=wf,
         train_start=str(o.index[0])[:10],split_date=str(o.index[k])[:10],test_end=str(o.index[-1])[:10],
         survivors=sum(r["test_beat"] for r in rows),total=len(rows))
 
@@ -1879,7 +2054,7 @@ SCORE_LABELS={"trend20":"Price vs EMA20","trend50":"Price vs EMA50","trend200":"
  "cross":"EMA 50/200 cross","ema50_slope":"EMA50 slope","macd_zero":"MACD vs 0","macd":"MACD momentum",
  "di":"DI direction","aroon":"Aroon","roc":"Momentum (ROC)","rsi":"RSI","stoch":"Stochastic",
  "mfi":"MFI","williams":"Williams %R","cci":"CCI","boll":"Bollinger %B","range52":"52w range pos",
- "obv":"OBV","rs":"Rel strength","vix":"VIX","news":"News","awn":"AlphaWire News"}
+ "obv":"OBV","rs":"Rel strength","vix":"VIX","weekly":"Weekly trend (gate)","news":"News","awn":"AlphaWire News"}
 
 def score_breakdown(d):
     """Per-indicator contribution (vote × weight) summing to the composite -> strength."""
@@ -2180,16 +2355,41 @@ def save_user_data(username,data):
 with _top_slot:
     _user=st.session_state.get("user")
     if _user:
-        _ar=st.columns([3,2,2])
+        _ar=st.columns([3,2,2,2])
         _ar[0].markdown(f"<div style='font-family:\"Chakra Petch\",sans-serif;color:{GREEN};"
                         f"font-weight:700;font-size:15px;padding-top:7px'>👤 {_user}</div>",unsafe_allow_html=True)
-        if _ar[1].button("💾 Save",use_container_width=True,key="acct_save",
+        with _ar[1].popover("📑 Lists",use_container_width=True):
+            _blobw=get_user_data(_user); _sets=_blobw.get("sets") or {}
+            if _sets:
+                _pick=st.selectbox("Saved watchlists",sorted(_sets.keys()),key="wlist_pick")
+                _wc1,_wc2=st.columns(2)
+                if _wc1.button("Load",use_container_width=True,key="wlist_load"):
+                    st.session_state["_load_syms"]=list(_sets.get(_pick) or [])
+                    st.session_state["_load_mode"]="replace"; st.rerun()
+                if _wc2.button("Delete",use_container_width=True,key="wlist_del"):
+                    _sets.pop(_pick,None); _blobw["sets"]=_sets; save_user_data(_user,_blobw); st.rerun()
+            else:
+                st.caption("No saved lists yet.")
+            _nm=st.text_input("Save current 5 as…",key="wlist_name",placeholder="e.g. Core / Earnings week")
+            if st.button("Save list",use_container_width=True,key="wlist_save"):
+                _cwl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]
+                _cwl=[s for s in _cwl if s]
+                if _nm.strip() and _cwl:
+                    _sets[_nm.strip()]=_cwl; _blobw["sets"]=_sets
+                    st.toast("List saved." if save_user_data(_user,_blobw) else "Save failed.",icon="📑")
+                else:
+                    st.toast("Name the list and have symbols in the boxes.",icon="⚠️")
+        if _ar[2].button("💾 Save",use_container_width=True,key="acct_save",
                          help="Save your watchlist + Alphawire rules to this account"):
             wl=[st.session_state.get(f"sym{i}","").strip().upper() for i in range(5)]; wl=[s for s in wl if s]
             bsp={k[len("bespoke_choice_"):]:v for k,v in st.session_state.items() if k.startswith("bespoke_choice_")}
-            ok=save_user_data(_user,{"watchlist":wl,"bespoke":bsp,"screens":st.session_state.get("screens_saved",{})})
+            _blob=get_user_data(_user)            # MERGE — don't wipe digest/watchlist-sets/portfolio
+            _blob.update({"watchlist":wl,"bespoke":bsp,"screens":st.session_state.get("screens_saved",{}),
+                          "portfolio":st.session_state.get("_pf_current",{}),
+                          "ps_acct":st.session_state.get("ps_acct",25000.0)})
+            ok=save_user_data(_user,_blob)
             st.toast("Saved." if ok else "Save failed (storage).",icon="💾" if ok else "⚠️")
-        if _ar[2].button("Log out",use_container_width=True,key="acct_logout"):
+        if _ar[3].button("Log out",use_container_width=True,key="acct_logout"):
             st.session_state.pop("user",None); st.rerun()
     else:
         _lc=st.columns([3,3,2,2],vertical_alignment="bottom")
@@ -2203,6 +2403,8 @@ with _top_slot:
                 dat=get_user_data(u)
                 if dat.get("watchlist"): st.session_state["_load_syms"]=dat["watchlist"]
                 if dat.get("screens"): st.session_state["screens_saved"]=dat["screens"]
+                if dat.get("portfolio"): st.session_state["_pf_restore"]=dat["portfolio"]
+                if dat.get("ps_acct"): st.session_state["ps_acct"]=float(dat["ps_acct"])
                 for tkr,choice in (dat.get("bespoke") or {}).items():
                     st.session_state[f"bespoke_choice_{tkr}"]=choice; st.session_state[f"besptog_{tkr}"]=True
                 st.rerun()
@@ -2468,11 +2670,37 @@ if tickers and (run or any(syms)):
             news_avg=news_avg, news_vote=news_vote, scores=scores, titles=titles,
             moves=moves, news_marks=news_marks, funda=funda,
             material=mat, move_rows=move_rows, kw_stats=kw_stats, news_years=yrs, fin=fin0,
-            awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last)
+            awn=awn_long, awn_score=awn_now, awn_raw=awn_raw, awn_last=awn_last, awn_hist=awn_score)
         _acache[t]=(_sig,data[t])
     prog.empty()
 
     if data:
+        # ---- SINCE YOUR LAST VISIT (account feature): verdict flips, big rank moves, new catalysts ----
+        _user_d=st.session_state.get("user")
+        if _user_d:
+            try:
+                _blob=get_user_data(_user_d)
+                _prev=_blob.get("last_seen") or {}
+                _cur={t:{"rank":int(d["strength"]),"verdict":d["state"]} for t,d in data.items()}
+                _lines=digest_changes(_prev.get("scores"),_cur)
+                _pts=float(_prev.get("ts") or 0)
+                if _pts:
+                    for t,d in data.items():
+                        _nn=[m for m in (d.get("material") or []) if float(m.get("dt") or 0)>_pts]
+                        if _nn:
+                            _lines.append((f"{t}: {len(_nn)} new catalyst{'s' if len(_nn)>1 else ''} — "
+                                           f"latest [{_nn[0]['category']}] {_nn[0]['title'][:70]}",CYAN))
+                if _lines:
+                    st.markdown(section_header("Since your last visit",rule=True),unsafe_allow_html=True)
+                    _dg="".join(f"<div style='font-family:\"IBM Plex Mono\",monospace;font-size:12.5px;"
+                                f"color:{c};margin:3px 0'>▸ {tx}</div>" for tx,c in _lines[:12])
+                    st.markdown(f"<div style='border:1px solid {GRID};border-radius:10px;padding:9px 12px;"
+                                f"background:{PANEL}'>{_dg}</div>",unsafe_allow_html=True)
+                import time as _tm2
+                _blob["last_seen"]={"ts":_tm2.time(),"scores":_cur}
+                save_user_data(_user_d,_blob)
+            except Exception:
+                pass
         if vix_now is not None:
             vc=GREEN if vix_now<14 else RED if vix_now>=28 else AMBER
             st.markdown(f"<div class='subnote'>Market fear · <b style='color:{vc}'>VIX {vix_now:.1f}</b> "
@@ -2566,8 +2794,32 @@ if tickers and (run or any(syms)):
                 st.markdown(f"<div style='border-top:2px dotted {TAB_PALETTE[_ci%len(TAB_PALETTE)]};"
                             f"margin:2px 1px 0;opacity:.85'></div>",unsafe_allow_html=True)
 
+        # ---- PORTFOLIO (positions & P&L on the loaded names) ----
+        st.markdown(section_header("Portfolio",rule=True),unsafe_allow_html=True)
+        with st.expander("💼 Enter positions (shares & book cost) — P&L, weights, weighted AlphaRank"):
+            _saved_pf=st.session_state.get("_pf_restore",{})
+            _pcols=st.columns(min(len(data),5))
+            _hold={}
+            for _pi,_pt in enumerate(data.keys()):
+                with _pcols[_pi%len(_pcols)]:
+                    st.markdown(f"<div style='color:{TAB_PALETTE[_pi%len(TAB_PALETTE)]};font-weight:700;"
+                                f"font-family:\'Chakra Petch\',sans-serif'>{_pt}</div>",unsafe_allow_html=True)
+                    _sh=st.number_input("Shares",min_value=0.0,step=1.0,
+                        value=float(_saved_pf.get(_pt,{}).get("sh",0.0)),key=f"pf_sh_{_pt}")
+                    _bc=st.number_input("Book $/sh",min_value=0.0,step=0.01,
+                        value=float(_saved_pf.get(_pt,{}).get("bc",0.0)),key=f"pf_bc_{_pt}")
+                    _hold[_pt]={"sh":_sh,"bc":_bc}
+            st.session_state["_pf_current"]=_hold
+            _prw,_ptot=portfolio_rows(data,_hold)
+            if _prw:
+                st.markdown(portfolio_html(_prw,_ptot),unsafe_allow_html=True)
+                st.caption("⬇ drag = the position currently costing the most P&L. "
+                           "💾 Save (top) stores these positions to your account.")
+            else:
+                st.caption("Enter shares for at least one loaded symbol to see P&L and weighted AlphaRank.")
+
         # MATRIX (dark HTML table — not st.dataframe, which renders white without a dark theme)
-        st.markdown(section_header("Indicator matrix"),unsafe_allow_html=True)
+        st.markdown(section_header("Indicator matrix",rule=True),unsafe_allow_html=True)
         dd,cc=matrix(data)
         st.markdown(matrix_html(dd,cc),unsafe_allow_html=True)
         choice=pick_indicator()
@@ -2576,7 +2828,7 @@ if tickers and (run or any(syms)):
         st.plotly_chart(overlay_indicator(choice,data),use_container_width=True)
 
         # PER-STOCK PRICE + SIGNALS
-        st.markdown(section_header("Price & historical signals"),unsafe_allow_html=True)
+        st.markdown(section_header("Price & historical signals",rule=True),unsafe_allow_html=True)
         _tk_order=list(data.keys())
         tabs=st.tabs(_tk_order)
         _tabcols=[TAB_PALETTE[i%len(TAB_PALETTE)] for i in range(len(_tk_order))]
@@ -2671,7 +2923,7 @@ if tickers and (run or any(syms)):
                            "the dark gaps during rallies are the missed upside that makes a strategy trail buy & hold. "
                            "Diamonds are news; toolbar = drawing tools. "
                            "**Tap any legend item to show/hide it** — candles vs line, EMAs, BUY/SELL, AlphaRank, Fibonacci.")
-                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,
+                st.plotly_chart(price_signals(d["o"],d["state_series"],d["strength_series"],t,awn_hist=d.get("awn_hist"),
                                     big=True,news_marks=d["news_marks"],trade_pos=pos),
                                 use_container_width=True,config=PLOTLY_DRAW,key=f"px_{t}")
 
@@ -2724,6 +2976,27 @@ if tickers and (run or any(syms)):
                             (bt["strat_ret"] if _has_bsp else None),len(d["o"]),_has_bsp,accent=acc),
                             unsafe_allow_html=True)
 
+                with st.expander("🎯 Position size & risk"):
+                    _pc1,_pc2,_pc3=st.columns(3)
+                    _acct=_pc1.number_input("Account size ($)",min_value=0.0,value=float(st.session_state.get("ps_acct",25000.0)),
+                                            step=1000.0,key=f"ps_acct_{t}")
+                    st.session_state["ps_acct"]=_acct
+                    _rk=_pc2.slider("Risk per trade (%)",0.25,3.0,1.0,0.25,key=f"ps_r_{t}")
+                    _ka=_pc3.slider("Stop distance (× ATR)",1.0,3.0,2.0,0.5,key=f"ps_k_{t}")
+                    _pr=d["funda"].get("price"); _ap=float(d["o"].ATRpct.iloc[-1]) if "ATRpct" in d["o"] else None
+                    _ps=position_size(_pr,_ap,_acct,_rk,_ka) if (_pr and _ap and _ap==_ap) else None
+                    if _ps:
+                        st.markdown(
+                            f"<div style='font-family:\"IBM Plex Mono\",monospace;font-size:13px;color:{TXT}'>"
+                            f"Risking <b style='color:{AMBER}'>${_ps['risk']:,.0f}</b> ({_rk:.2f}%) with a stop "
+                            f"<b>{_ka:.1f}×ATR</b> = <b style='color:{RED}'>${_ps['stop']:,.2f}</b> "
+                            f"(−${_ps['dist']:,.2f}/sh) → buy <b style='color:{GREEN}'>{_ps['shares']:,}</b> shares "
+                            f"≈ ${_ps['cost']:,.0f} ({_ps['pct_of_acct']:.0f}% of account).</div>",
+                            unsafe_allow_html=True)
+                        st.caption("A sizing calculator, not advice — stops can gap through in fast markets.")
+                    else:
+                        st.caption("Needs a live price and ATR to size a position.")
+
                 # ---- BESPOKE OPTIMIZER: search indicator COMBINATIONS, test them out-of-sample ----
                 st.markdown(
                     f"<div style='margin:22px 0 0;padding:13px 16px;border-radius:12px;"
@@ -2750,6 +3023,16 @@ if tickers and (run or any(syms)):
                     ores=st.session_state.get(f"optres_{t}")
                     if ores and ores["rows"]:
                         st.markdown(combo_table_html(ores,limit=12),unsafe_allow_html=True)
+                        _wf=ores.get("wf")
+                        if _wf:
+                            _wcol=GREEN if _wf["beat"]>=max(2,_wf["folds"]-1) else (AMBER if _wf["beat"]>=1 else RED)
+                            st.markdown(
+                                f"<div style='font-family:\"IBM Plex Mono\",monospace;font-size:12px;color:{MUTE};"
+                                f"margin:4px 2px 8px'>🔁 Walk-forward (re-selected each fold on prior data only): "
+                                f"honest pick beat B&amp;H in <b style='color:{_wcol}'>{_wf['beat']}/{_wf['folds']}</b> "
+                                f"unseen folds · same rule chosen in <b style='color:{TXT}'>{_wf['stable']}/{_wf['folds']}</b> "
+                                f"(most-picked: {_wf['stable_label']}). Low stability = the 'best' rule is noise-chasing.</div>",
+                                unsafe_allow_html=True)
                         surv,tot=ores["survivors"],ores["total"]
                         msg=("**None** beat buy &amp; hold out-of-sample — the glittering in-sample fits were curve-fit "
                              "to this stock's past and fell apart on unseen data. That is the trap, made visible."

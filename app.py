@@ -175,13 +175,17 @@ button[kind="headerNoPadding"], button[kind="headerNoPadding"] *{
 /* ---- settings now live in an expander under the login, so hide the sidebar + its open pill entirely ---- */
 [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"]{ display:none !important; }
 [data-testid="stSidebar"]{ display:none !important; }
-/* ---- settings popover trigger: NO pill — plain header-style text matching the bracket header ---- */
+/* ---- settings popover trigger: NO pill — plain header-style text matching the bracket header ----
+   Both texts are 21px glyphs centered in a 27px line box with ZERO outer margins, and the row is
+   top-aligned — so their baselines coincide by construction. */
+[data-testid="stPopover"]{ margin:0 !important; padding:0 !important; }
 [data-testid="stPopover"] button{ background:transparent !important; border:none !important;
-  box-shadow:none !important; padding:0 6px 0 0 !important; min-height:0 !important;
-  justify-content:flex-end !important; }
+  box-shadow:none !important; padding:0 6px 0 0 !important; margin:0 !important;
+  min-height:0 !important; height:27px !important; justify-content:flex-end !important; }
 [data-testid="stPopover"] button p, [data-testid="stPopover"] button div{
   font-family:'Chakra Petch',sans-serif !important; font-weight:800 !important;
-  font-size:21px !important; color:#e6edf3 !important; letter-spacing:.01em !important; }
+  font-size:21px !important; line-height:27px !important; margin:0 !important; padding:0 !important;
+  color:#e6edf3 !important; letter-spacing:.01em !important; }
 [data-testid="stPopover"] button svg{ width:1.5rem !important; height:1.5rem !important;
   color:#3ec1d3 !important; fill:#3ec1d3 !important; }
 /* the floating panel paints WHITE on an inner div — force every layer dark */
@@ -441,7 +445,9 @@ def parse_news(item):
 @st.cache_data(ttl=900,show_spinner=False)
 def get_hist(t,period):
     df=yf.Ticker(t).history(period=period,auto_adjust=True)
-    return df[["Open","High","Low","Close","Volume"]] if not df.empty else None
+    if df is None or df.empty: return None
+    df=df[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])  # drop Yahoo's empty 'today' row
+    return df if not df.empty else None
 @st.cache_data(ttl=900,show_spinner=False)
 def get_news(t,n=8):
     try: return [parse_news(x) for x in (yf.Ticker(t).news or [])[:n]]
@@ -536,6 +542,9 @@ def _prefetch_ticker(t, period, yrs, key):
     try:
         _df=yf.Ticker(t).history(period=period,auto_adjust=True)
         h=_df[["Open","High","Low","Close","Volume"]] if (_df is not None and not _df.empty) else None
+        if h is not None:
+            h=h.dropna(subset=["Close"])         # Yahoo mints an empty 'today' row pre-market (NaN OHLC,
+            if h.empty: h=None                   # real volume) -> poisons price/Stoch/ATR/AWN with nan
     except Exception:
         h=None
     fu={}; ni=[]; nsrc="Yahoo"
@@ -859,13 +868,15 @@ def news_reaction_summary(scores, moves):
 def get_vix_hist(period):
     try:
         v=yf.Ticker("^VIX").history(period=period,auto_adjust=True)
-        return v["Close"] if not v.empty else None
+        v=v["Close"].dropna() if not v.empty else None
+        return v if (v is not None and len(v)) else None
     except Exception: return None
 @st.cache_data(ttl=900,show_spinner=False)
 def get_spy(period):
     try:
         s=yf.Ticker("SPY").history(period=period,auto_adjust=True)
-        return s["Close"] if not s.empty else None
+        s=s["Close"].dropna() if not s.empty else None
+        return s if (s is not None and len(s)) else None
     except Exception: return None
 def _fundamentals_raw(t):
     info={}; tk=None
@@ -1143,7 +1154,7 @@ def _scan_universe_build(universe_name, period):
         try:
             df=yf.Ticker(t).history(period=period, auto_adjust=True)   # proven path; works for single names
             if df is None or df.empty: return None
-            sub=df[["Open","High","Low","Close","Volume"]].dropna(how="all")
+            sub=df[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
             if len(sub)<40: return None
             return _scan_row(t, sub.copy(), vix, spy)
         except Exception:
@@ -1344,12 +1355,12 @@ def matrix_html(dd, cc):
             f"font-family:\"IBM Plex Mono\",monospace'>"
             f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>")
 
-def section_header(txt, color=CYAN, ml=0, mb=9):
+def section_header(txt, color=CYAN, ml=0, mb=9, mt=13):
     """A section title flanked by hard brackets, to set sections apart as their own block.
-    ml = left-margin nudge (px) for column-nested headers; mb = bottom margin (px)."""
+    ml = left nudge (px); mb/mt = bottom/top margins (px)."""
     b=(f"<span style='color:{color};font-family:\"Chakra Petch\",sans-serif;font-weight:800;"
        "font-size:27px;line-height:1'>")
-    return (f"<div style='display:flex;align-items:center;gap:9px;margin:13px 0 {mb}px;margin-left:{ml}px'>{b}[</span>"
+    return (f"<div style='display:flex;align-items:center;gap:9px;margin:{mt}px 0 {mb}px;margin-left:{ml}px'>{b}[</span>"
             f"<span style='font-family:\"Chakra Petch\",sans-serif;font-weight:800;font-size:21px;"
             f"color:{TXT};letter-spacing:.01em'>{txt}</span>{b}]</span></div>")
 
@@ -2152,8 +2163,8 @@ with _top_slot:
             ok,msg=register_user(_au,_ap); (st.success if ok else st.error)(msg)
             if ok: st.session_state["user"]=_au.strip().lower(); st.rerun()
 
-_hc=st.columns([5,4],vertical_alignment="bottom")
-_hc[0].markdown(section_header("Enter up to 5 symbols", ml=-9, mb=2),unsafe_allow_html=True)
+_hc=st.columns([5,4],vertical_alignment="top")
+_hc[0].markdown(section_header("Enter up to 5 symbols", ml=-9, mb=0, mt=0),unsafe_allow_html=True)
 _settings_exp=_hc[1].popover("⚙ Analysis settings",use_container_width=True)
 with _settings_exp:
     period=st.selectbox("History window (data depth)",["1mo","3mo","6mo","1y","2y","5y","10y","max"],index=5,
